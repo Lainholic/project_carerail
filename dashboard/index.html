@@ -569,29 +569,33 @@
 </div>
 
 <script>
-  const RPC_URL = "https://rpc.testnet.fastnear.com";
+  const RPC_URLS = ["https://test.rpc.fastnear.com", "https://rpc.testnet.near.org"];
   const CONTRACT_ID = "carerail-274071e4.testnet";
   let isPaused = false;
   let blockedCount = 14;
   let currentProposalId = null;
 
   async function queryRpc(method, params) {
-    try {
-      const res = await fetch(RPC_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: "dashboard-" + Date.now(),
-          method: method,
-          params: params
-        })
-      });
-      return await res.json();
-    } catch (e) {
-      console.warn("RPC query error:", e);
-      return null;
+    for (const url of RPC_URLS) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "dashboard-" + Date.now(),
+            method: method,
+            params: params
+          })
+        });
+        if (res.ok) {
+          return await res.json();
+        }
+      } catch (e) {
+        console.warn(`RPC query to ${url} failed:`, e);
+      }
     }
+    return null;
   }
 
   async function refreshLiveOnChainState() {
