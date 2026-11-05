@@ -15,6 +15,7 @@ if ROOT_DIR not in sys.path:
 
 from policy.engine import CareRailEngine, PolicyRules, ProposalState
 from agent.service_agent import UntrustedCareAgent
+from agent.llm_agent import AutonomousCareAgent
 from near_rail.client import NearRailClient
 
 RULES_PATH = os.path.join(ROOT_DIR, "policy", "rules.json")
@@ -31,6 +32,7 @@ SENDER_ACCOUNT_ID = get_env_account_id()
 policy_rules = PolicyRules.load_from_json(RULES_PATH)
 engine = CareRailEngine(policy_rules)
 agent = UntrustedCareAgent()
+llm_agent = AutonomousCareAgent("carerail-live-agent")
 near_client = NearRailClient()
 
 
@@ -93,6 +95,44 @@ class CareRailServerHandler(SimpleHTTPRequestHandler):
                 body = json.loads(raw)
             except Exception:
                 body = {}
+
+        if parsed.path == "/api/chat":
+            user_msg = body.get("message", "")
+            web_context = body.get("web_context", "")
+
+            # 1. Agent processes user natural language
+            prop = llm_agent.process_instruction(user_msg, untrusted_web_context=web_context)
+
+            # 2. Policy engine evaluates proposal
+            state, reason = engine.evaluate_proposal(prop)
+            result = {
+                "proposal_id": prop.proposal_id,
+                "recipient": prop.recipient,
+                "amount_near": prop.amount_near,
+                "intent_memo": prop.intent_memo,
+                "state": state.value,
+                "rejection_reason": reason,
+            }
+
+            if state == ProposalState.APPROVED:
+                tx_res = near_client.submit_settlement(
+                    sender_account=SENDER_ACCOUNT_ID,
+                    recipient_account=prop.recipient,
+                    amount_near=prop.amount_near,
+                    proposal_hash=prop.compute_hash(),
+                    dry_run=False,
+                )
+                engine.commit_spend(prop.proposal_id, tx_res.get("transaction_hash", ""))
+                result["tx"] = tx_res
+                result["state"] = ProposalState.CONFIRMED.value
+                result["bot_response"] = f"예약 결제가 성공적으로 완료되었습니다 ({prop.amount_near} NEAR). 온체인 트랜잭션이 확정되었습니다."
+            elif state == ProposalState.AWAITING_OWNER_APPROVAL:
+                result["bot_response"] = f"요청 금액({prop.amount_near} NEAR)이 자율 한도(2.0 NEAR)를 초과하여 소유자 승인 대기 중입니다. 지문/서명 승인을 진행해주세요."
+            else:
+                result["bot_response"] = f"[보안 경고] 비인가 결제 시도가 감지되어 CareRail 방화벽이 차단했습니다! (사유: {reason})"
+
+            self._send_json(result)
+            return
 
         if parsed.path == "/api/scenario/run":
             scenario_type = body.get("type", "normal")
