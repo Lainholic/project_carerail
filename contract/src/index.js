@@ -375,8 +375,8 @@ export class PolicyVault {
 
     this._checkAndResetDailyAllowance();
 
-    // Input sanitization: ensure valid positive BigInt and bounded memo
-    assert(typeof recipient === 'string' && recipient.length > 0, "Invalid recipient");
+    // Input sanitization: ensure valid positive BigInt, bounded memo, and valid recipient length
+    assert(typeof recipient === 'string' && recipient.length > 0 && recipient.length <= 64, "Invalid recipient: must be between 1 and 64 characters");
     assert(!memo || memo.length <= 256, "SECURITY_ALERT: Memo exceeds 256 character limit");
     assert(amount !== undefined && amount !== null, "Invalid amount: required");
     const amountStr = typeof amount === 'string' ? amount : amount.toString();

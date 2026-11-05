@@ -334,6 +334,12 @@ class CareRailEngine:
             proposal.rejection_reason = f"DOS_PROTECTION: Pending proposals pool exhausted ({pending_count}/{self.rules.max_pending_proposals})"
             return proposal.state, proposal.rejection_reason
 
+        # 1b. Recipient format and bounded length check
+        if not isinstance(proposal.recipient, str) or len(proposal.recipient) == 0 or len(proposal.recipient) > 64:
+            proposal.state = ProposalState.REJECTED
+            proposal.rejection_reason = "RECIPIENT_VIOLATION: Recipient account ID invalid or exceeds 64 characters"
+            return proposal.state, proposal.rejection_reason
+
         # 2. Recipient Whitelist
         if proposal.recipient not in self.rules.allowed_recipients:
             proposal.state = ProposalState.REJECTED
@@ -351,6 +357,14 @@ class CareRailEngine:
         if amt_dec > self._max_per_tx_dec:
             proposal.state = ProposalState.REJECTED
             proposal.rejection_reason = f"LIMIT_EXCEEDED: Amount {proposal.amount_near} NEAR exceeds max per transfer limit {self.rules.max_per_transfer_near} NEAR"
+            return proposal.state, proposal.rejection_reason
+
+        # 4b. Memo format and bounded length check (DoS defense)
+        if not isinstance(proposal.intent_memo, str):
+            proposal.intent_memo = str(proposal.intent_memo or "")
+        if len(proposal.intent_memo) > 256:
+            proposal.state = ProposalState.REJECTED
+            proposal.rejection_reason = "MEMO_VIOLATION: Memo exceeds max length of 256 characters"
             return proposal.state, proposal.rejection_reason
 
         # 5. Prompt Injection Defense (Semantic anomaly keyword filtering)

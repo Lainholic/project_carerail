@@ -95,6 +95,12 @@ def main():
         [sys.executable, "-m", "unittest", "near_rail/test_intents_adapter.py"]
     ))
 
+    # 11. Extreme Edge-Cases & Attack Injection Suite
+    results.append(run_step(
+        "11. Extreme Edge-Cases & Boundary Adversarial Attacks (Python)",
+        [sys.executable, "-m", "unittest", "test_extreme_edge_cases.py"]
+    ))
+
     print("=" * 70)
     passed = sum(1 for r in results if r)
     total = len(results)

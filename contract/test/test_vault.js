@@ -276,6 +276,9 @@ class PolicyVaultTestable {
     }
 
     this._checkAndResetDailyAllowance();
+    if (!recipient || typeof recipient !== 'string' || recipient.length === 0 || recipient.length > 64) {
+      throw new Error("Invalid recipient: must be between 1 and 64 characters");
+    }
     if (memo && memo.length > 256) {
       throw new Error("SECURITY_ALERT: Memo exceeds 256 character limit");
     }
@@ -898,7 +901,35 @@ async function runTests() {
   }, /must be positive integer yoctoNEAR string/);
   console.log("[PASS] Test 23: Non-Integer & Malformed Amount Injection Blocked");
 
-  console.log("\n>>> ALL 23 CONTRACT INVARIANT TESTS PASSED (100%) <<<");
+  // Test 24: Bounded Recipient Length Protection (1 to 64 chars)
+  assert.throws(() => {
+    vault.propose_payment({
+      recipient: "a".repeat(65),
+      amount: "1000000000000000000000",
+      memo: "Recipient Over 64 Chars"
+    });
+  }, /must be between 1 and 64 characters/);
+
+  assert.throws(() => {
+    vault.propose_payment({
+      recipient: "",
+      amount: "1000000000000000000000",
+      memo: "Empty Recipient"
+    });
+  }, /must be between 1 and 64 characters/);
+  console.log("[PASS] Test 24: Bounded Recipient Account ID (1-64 chars) Verified");
+
+  // Test 25: 10,000 Chars Memory Bombing in Memo Blocked
+  assert.throws(() => {
+    vault.propose_payment({
+      recipient: validRecipient,
+      amount: "1000000000000000000000",
+      memo: "X".repeat(10000)
+    });
+  }, /Memo exceeds 256 character limit/);
+  console.log("[PASS] Test 25: 10k Character Memory Bombing in Memo Blocked");
+
+  console.log("\n>>> ALL 25 CONTRACT INVARIANT TESTS PASSED (100%) <<<");
 }
 
 runTests().catch(err => {
