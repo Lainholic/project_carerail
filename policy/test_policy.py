@@ -320,6 +320,57 @@ class TestCareRailEngine(unittest.TestCase):
         state, reason = self.engine.evaluate_proposal(p_normal)
         self.assertEqual(state, ProposalState.APPROVED)
 
+    def test_p0_b_fsm_object_immutability_on_re_evaluation(self):
+        """Terra P0-B Counter-example test: Passing an already confirmed proposal back into evaluate_proposal
+        must NOT mutate its internal state to REJECTED or VALIDATING.
+        """
+        p = PaymentProposal(
+            proposal_id="prop-p0-b",
+            agent_id="agent-1",
+            recipient="care-provider.testnet",
+            amount_near=1.0,
+            intent_memo="Legitimate check",
+            nonce=6001,
+        )
+        self.engine.evaluate_proposal(p)
+        self.engine.commit_spend("prop-p0-b", "tx-confirmed-hash")
+        self.assertEqual(p.state, ProposalState.CONFIRMED)
+
+        # Re-evaluate the identical object reference
+        state, reason = self.engine.evaluate_proposal(p)
+        # Must return duplicate rejection while preserving CONFIRMED state on original
+        self.assertEqual(state, ProposalState.CONFIRMED)
+        self.assertEqual(p.state, ProposalState.CONFIRMED)
+        self.assertIn("DUPLICATE_PROPOSAL_ID", reason)
+
+    def test_p0_a_day_boundary_commit_spend_headroom_check(self):
+        """Terra P0-A Counter-example test: If a proposal is submitted on Day D, and Day D+1 budget is full,
+        commit_spend on Day D+1 must reject to prevent budget overrun.
+        """
+        p = PaymentProposal(
+            proposal_id="prop-p0-a",
+            agent_id="agent-1",
+            recipient="care-provider.testnet",
+            amount_near=5.0,
+            intent_memo="Day D Proposal",
+            nonce=7001,
+        )
+        p.submitted_day = "2026-11-04" # Yesterday
+        self.engine.rules.max_daily_total_near = 10.0
+        self.engine.proposals[p.proposal_id] = p
+        p.state = ProposalState.APPROVED
+        self.engine.daily_reserved_ledger["2026-11-04"] = 5.0
+
+        # Fill today's spend to 8.0 NEAR (10.0 limit)
+        today_key = self.engine._get_today_key()
+        self.engine.daily_spend_ledger[today_key] = 8.0
+
+        # Attempt to commit 5.0 NEAR proposal today: 8.0 + 5.0 = 13.0 > 10.0 limit. MUST BE REJECTED!
+        success = self.engine.commit_spend("prop-p0-a", "tx-cross-day-hash")
+        self.assertFalse(success)
+        self.assertEqual(p.state, ProposalState.APPROVED)
+        self.assertEqual(self.engine.get_today_spent(), 8.0)
+
 
 if __name__ == "__main__":
     unittest.main()

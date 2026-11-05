@@ -116,6 +116,9 @@ class PolicyVaultTestable {
     }
 
     this._checkAndResetDailyAllowance();
+    if (memo && memo.length > 256) {
+      throw new Error("SECURITY_ALERT: Memo exceeds 256 character limit");
+    }
     const amt = BigInt(amount);
     if (amt <= BigInt(0)) throw new Error("Amount must be strictly positive");
 
@@ -415,7 +418,18 @@ async function runTests() {
   assert.strictEqual(vault.spent_today, BigInt("2000000000000000000000000"));
   console.log("[PASS] Test 12: Day-Boundary Accounting Isolation Verified (P0 Fixed)");
 
-  console.log("\n>>> ALL 12 CONTRACT INVARIANT TESTS PASSED (100%) <<<");
+  // 13. P2: Memo Length Ceiling (256 chars max)
+  global.near._caller = "agent-01.testnet";
+  assert.throws(() => {
+    vault.propose_payment({
+      recipient: "care-clinic.testnet",
+      amount: "1000000000000000000000000",
+      memo: "A".repeat(300)
+    });
+  }, /SECURITY_ALERT: Memo exceeds 256 character limit/);
+  console.log("[PASS] Test 13: Bounded Storage Memo Protection Verified (P2 Fixed)");
+
+  console.log("\n>>> ALL 13 CONTRACT INVARIANT TESTS PASSED (100%) <<<");
 }
 
 runTests().catch(err => {

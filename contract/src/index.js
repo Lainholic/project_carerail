@@ -88,8 +88,9 @@ export class PolicyVault {
 
     this._checkAndResetDailyAllowance();
 
-    // Input sanitization: ensure valid positive BigInt
+    // Input sanitization: ensure valid positive BigInt and bounded memo
     assert(typeof recipient === 'string' && recipient.length > 0, "Invalid recipient");
+    assert(!memo || memo.length <= 256, "SECURITY_ALERT: Memo exceeds 256 character limit");
     const amt = BigInt(amount);
     assert(amt > BigInt(0), "Amount must be strictly positive");
 
@@ -208,7 +209,8 @@ export class PolicyVault {
       return true;
     } catch (e) {
       // Transfer failed on-chain! Rollback spent_today ONLY if failure happened on same accounting day
-      const amt = BigInt(amount);
+      // Security enhancement: Use stored proposal.amount to prevent caller arg tampering
+      const amt = BigInt(proposal.amount || amount);
       const submittedDay = BigInt(proposal.submittedDay || this.last_reset_day.toString());
       if (submittedDay === this.last_reset_day) {
         if (this.spent_today >= amt) {

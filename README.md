@@ -5,7 +5,7 @@
 > **Secondary Tracks**: `[ 07 / AGT ] Agent Economy`, `[ 04 / BUS ] Autonomous Business`  
 > **License**: MIT  
 > **On-Chain Vault Contract**: [`carerail-274071e4.testnet`](https://testnet.nearblocks.io/address/carerail-274071e4.testnet)  
-> **Contract Deployment Tx**: [`HoYEThkufFdPeCkc8haSuRpNpgSStFxECZNkwAWkQQn2`](https://testnet.nearblocks.io/txns/HoYEThkufFdPeCkc8haSuRpNpgSStFxECZNkwAWkQQn2)  
+> **Contract Deployment Tx**: [`2hbGWK2nH4KdLANpZraFtJbhsXsyLPXH9MYzhRrD6nmC`](https://testnet.nearblocks.io/txns/2hbGWK2nH4KdLANpZraFtJbhsXsyLPXH9MYzhRrD6nmC)  
 > **Live Testnet Settlement**: [`CWEZYdHAtx7kPEQrvLsrsdbU3c1ffdfLPoQz2d5F4hk4`](https://testnet.nearblocks.io/txns/CWEZYdHAtx7kPEQrvLsrsdbU3c1ffdfLPoQz2d5F4hk4)
 
 ---
