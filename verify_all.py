@@ -101,6 +101,12 @@ def main():
         [sys.executable, "-m", "unittest", "test_extreme_edge_cases.py"]
     ))
 
+    # 12. Advanced Institutional Security Features Suite
+    results.append(run_step(
+        "12. Advanced Institutional Security (Velocity Limiting, Multi-Tenant, Merkle Audit)",
+        [sys.executable, "-m", "unittest", "test_advanced_security_features.py"]
+    ))
+
     print("=" * 70)
     passed = sum(1 for r in results if r)
     total = len(results)

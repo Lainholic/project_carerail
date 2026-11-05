@@ -98,7 +98,7 @@ cd project_carerail
 python verify_all.py
 ```
 
-### Automated Verification Suite Results (11/11 PASS - 100% Invariants Verified):
+### Automated Verification Suite Results (12/12 PASS - 100% Invariants Verified):
 1. **PolicyVault Smart Contract Invariants (Node.js)**: 25 invariant tests covering callback isolation, day-boundary rollback, emergency killswitch, anti-dust floor, bounded 256-character memo, bounded 64-character recipient, governance 24h timelock, cryptographic engine attestation, and malformed float/string injection defense.
 2. **Deterministic FSM Policy Engine & Decimal Arithmetic (Python)**: 17 invariant tests covering exact Decimal arithmetic (eliminating IEEE-754 errors), atomic reservation, cross-day budget isolation, and persistent SQLite recovery.
 3. **On-Chain Reconciliation & Settlement Verifier (Python)**: Fail-closed transaction receipt and action hash reconciliation.
@@ -118,6 +118,7 @@ python verify_all.py
    - Network griefing / RPC timeout reservation retention.
 10. **NEAR Intents Cross-Chain Pre-Flight Firewall Adapter**: Pre-flight inspection of NEP-413 intent messages, token diffs, and cross-chain routing.
 11. **Extreme Edge-Cases & Attack Injection Suite**: 10,000-character memo bombing, null byte and SQL injection sanitization, sub-dust (0.000999999999999999 NEAR) floor precision, 1-second timelock race condition, and MITM ticket recipient substitution.
+12. **Advanced Institutional Security Suite**: Sliding-window velocity rate limiting (burst throttling), automated circuit breaker auto-freeze on rapid-fire attacks, multi-tenant sub-budget sandboxing (per-agent quota isolation), and RFC 6962 cryptographic Merkle audit trail with inclusion proofs.
 
 ---
 

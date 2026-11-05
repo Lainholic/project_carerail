@@ -69,6 +69,8 @@ class PolicyRules:
     owner_public_key: Optional[str] = None
     min_transfer_floor_near: float = 0.001
     max_pending_proposals: int = 50
+    max_requests_per_minute: int = 120
+    agent_quotas: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
     @classmethod
     def load_from_json(cls, path: str) -> "PolicyRules":
@@ -87,6 +89,8 @@ class PolicyRules:
             owner_public_key=data.get("owner_public_key"),
             min_transfer_floor_near=float(data.get("min_transfer_floor_near", 0.001)),
             max_pending_proposals=int(data.get("max_pending_proposals", 50)),
+            max_requests_per_minute=int(data.get("max_requests_per_minute", 120)),
+            agent_quotas=dict(data.get("agent_quotas", {})),
         )
 
 
@@ -203,6 +207,13 @@ class CareRailEngine:
         self.daily_reserved_ledger: Dict[str, Decimal] = {}   # Date string -> pending reserved Decimal
         self.is_paused: bool = self.storage.get_pause_state()
         self.attestation_engine = AttestationEngine(engine_id, attestation_secret) if attestation_secret else None
+
+        # Defense Features: Merkle Audit Trail, Sliding Window Velocity Limiter, Multi-Tenant Quotas
+        from policy.audit_merkle import MerkleAuditTrail
+        self.audit_trail = MerkleAuditTrail()
+        self.request_timestamps: Dict[str, List[float]] = {}
+        self.consecutive_violations: Dict[str, int] = {}
+        self.agent_daily_spend: Dict[str, Dict[str, Decimal]] = {}
 
         # 1. Restore all daily ledgers from storage
         all_ledgers = self.storage.get_all_daily_ledgers()
@@ -340,6 +351,25 @@ class CareRailEngine:
             proposal.rejection_reason = "RECIPIENT_VIOLATION: Recipient account ID invalid or exceeds 64 characters"
             return proposal.state, proposal.rejection_reason
 
+        # 1c. Velocity Rate Limiting (Sliding Window 60s)
+        now = time.time()
+        agent_reqs = self.request_timestamps.setdefault(proposal.agent_id, [])
+        cutoff_time = now - 60.0
+        self.request_timestamps[proposal.agent_id] = [t for t in agent_reqs if t > cutoff_time]
+        agent_reqs = self.request_timestamps[proposal.agent_id]
+
+        if len(agent_reqs) >= self.rules.max_requests_per_minute:
+            proposal.state = ProposalState.REJECTED
+            self.consecutive_violations[proposal.agent_id] = self.consecutive_violations.get(proposal.agent_id, 0) + 1
+            proposal.rejection_reason = f"VELOCITY_LIMIT_EXCEEDED: Agent {proposal.agent_id} exceeded {self.rules.max_requests_per_minute} req/min"
+            if self.consecutive_violations[proposal.agent_id] >= 5:
+                self.set_emergency_pause(True)
+                proposal.rejection_reason += " -> AUTO_CIRCUIT_BREAKER_TRIGGERED: Rapid-fire attack auto-paused engine!"
+            self.audit_trail.add_record(proposal.__dict__)
+            return proposal.state, proposal.rejection_reason
+
+        agent_reqs.append(now)
+
         # 2. Recipient Whitelist
         if proposal.recipient not in self.rules.allowed_recipients:
             proposal.state = ProposalState.REJECTED
@@ -358,6 +388,22 @@ class CareRailEngine:
             proposal.state = ProposalState.REJECTED
             proposal.rejection_reason = f"LIMIT_EXCEEDED: Amount {proposal.amount_near} NEAR exceeds max per transfer limit {self.rules.max_per_transfer_near} NEAR"
             return proposal.state, proposal.rejection_reason
+
+        # 4a. Per-Agent Sub-Budget Sandbox Quotas
+        agent_quota = self.rules.agent_quotas.get(proposal.agent_id)
+        if agent_quota:
+            ag_per_tx = _to_decimal(agent_quota.get("per_tx_limit", self.rules.max_per_transfer_near))
+            ag_daily = _to_decimal(agent_quota.get("daily_limit", self.rules.max_daily_total_near))
+            if amt_dec > ag_per_tx:
+                proposal.state = ProposalState.REJECTED
+                proposal.rejection_reason = f"AGENT_QUOTA_EXCEEDED: Amount exceeds agent-specific ceiling ({ag_per_tx} NEAR)"
+                return proposal.state, proposal.rejection_reason
+            today_k = self._get_today_key()
+            current_ag_spent = self.agent_daily_spend.setdefault(today_k, {}).get(proposal.agent_id, Decimal("0"))
+            if current_ag_spent + amt_dec > ag_daily:
+                proposal.state = ProposalState.REJECTED
+                proposal.rejection_reason = f"AGENT_DAILY_QUOTA_EXCEEDED: Transfer exceeds agent daily quota ({ag_daily} NEAR)"
+                return proposal.state, proposal.rejection_reason
 
         # 4b. Memo format and bounded length check (DoS defense)
         if not isinstance(proposal.intent_memo, str):
