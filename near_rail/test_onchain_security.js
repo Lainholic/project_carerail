@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { KeyPair, KeyPairSigner, JsonRpcProvider, Account, parseNearAmount, actions } = require('near-api-js');
 
-// 1. Read .env file safely
+// 1. Read .env file safely - Key Isolation Invariant
 const envPath = path.resolve(__dirname, '..', '.env');
 const envContent = fs.readFileSync(envPath, 'utf8');
 const envVars = {};
@@ -16,9 +16,14 @@ envContent.split('\n').forEach(line => {
 const accountId = envVars.CARERAIL_TESTNET_ACCOUNT_ID;
 const ownerPrivKey = envVars.CARERAIL_TESTNET_PRIVATE_KEY;
 
-// The Agent key we generated and registered on-chain with FunctionCallAccessKey restricted to propose_payment
-const agentPrivKey = "ed25519:55jNUTA9ZBiNdGu9x1NBhsWBmiWYgLhaKxPKyWDSFsM5erG8QczH9iEG7rsrRHPLf3Q4HH2CSKknFg9NrjLJGog7";
-const agentPubKey = "ed25519:KSYs9V1HMDw91mDHfQYEL6moMmqx2MvQrutJ8SAxqHu";
+// Load agent keys strictly from isolated environment credentials
+const agentPrivKey = envVars.CARERAIL_AGENT_PRIVATE_KEY;
+const agentPubKey = envVars.CARERAIL_AGENT_PUBLIC_KEY;
+
+if (!accountId || !ownerPrivKey || !agentPrivKey || !agentPubKey) {
+  console.error("Missing required environment credentials in .env");
+  process.exit(1);
+}
 
 async function runSecurityAudit() {
   console.log("===============================================================================");
@@ -50,19 +55,19 @@ async function runSecurityAudit() {
     });
     console.error("  [FAIL] Malicious transfer was NOT blocked by NEAR protocol!");
   } catch (err) {
-    const isBlocked = err.message.includes("does not have permissions") ||
-                      err.message.includes("ReceiverMismatch") ||
-                      err.message.includes("InvalidAccessKeyError") ||
-                      err.message.includes("MethodNameMismatch") ||
-                      err.message.includes("NotAllowed") ||
-                      err.message.includes("ActionIsNotAllowed") ||
-                      err.message.includes("Transaction has a signature from a key with limited access");
-    if (isBlocked || err.message.length > 0) {
+    const isExactProtocolBlock =
+      err.message.includes("Not enough allowance") ||
+      err.message.includes("ActionIsNotAllowed") ||
+      err.message.includes("Transaction has a signature from a key with limited access") ||
+      err.message.includes("InvalidAccessKeyError") ||
+      err.message.includes("ReceiverMismatch");
+
+    if (isExactProtocolBlock) {
       console.log(`  [PASS] Blocked by NEAR Protocol Layer!`);
       console.log(`  Reason: ${err.message.split('\n')[0]}`);
       passed++;
     } else {
-      console.error(`  [FAIL] Unexpected error: ${err.message}`);
+      console.error(`  [FAIL] Unexpected or unhandled failure type: ${err.message}`);
     }
   }
 
@@ -77,17 +82,17 @@ async function runSecurityAudit() {
     });
     console.error("  [FAIL] Privileged call was NOT blocked by NEAR protocol!");
   } catch (err) {
-    const isBlocked = err.message.includes("MethodNameMismatch") ||
-                      err.message.includes("does not have permissions") ||
-                      err.message.includes("Transaction has a signature from a key with limited access") ||
-                      err.message.includes("InvalidAccessKeyError") ||
-                      err.message.includes("ActionIsNotAllowed");
-    if (isBlocked || err.message.length > 0) {
+    const isExactMethodBlock =
+      err.message.includes("Access key does not allow method") ||
+      err.message.includes("MethodNameMismatch") ||
+      err.message.includes("ActionIsNotAllowed");
+
+    if (isExactMethodBlock) {
       console.log(`  [PASS] Blocked by NEAR Protocol Layer!`);
       console.log(`  Reason: ${err.message.split('\n')[0]}`);
       passed++;
     } else {
-      console.error(`  [FAIL] Unexpected error: ${err.message}`);
+      console.error(`  [FAIL] Unexpected or unhandled failure type: ${err.message}`);
     }
   }
 
@@ -106,11 +111,15 @@ async function runSecurityAudit() {
       }, gasLimit, BigInt(0))]
     });
 
-    // Check if receipt contains failure
     if (result.status && result.status.Failure) {
-      console.log(`  [PASS] Blocked by Smart Contract Guardrail!`);
-      console.log(`  Panic: ${JSON.stringify(result.status.Failure)}`);
-      passed++;
+      const failureStr = JSON.stringify(result.status.Failure);
+      if (failureStr.includes("SECURITY_VIOLATION") || failureStr.includes("not whitelisted") || failureStr.includes("GuestPanic")) {
+        console.log(`  [PASS] Blocked by Smart Contract Guardrail!`);
+        console.log(`  Panic: ${failureStr}`);
+        passed++;
+      } else {
+        console.error(`  [FAIL] Contract failed with unexpected reason: ${failureStr}`);
+      }
     } else {
       console.error("  [FAIL] Payment to unwhitelisted recipient succeeded!");
     }
@@ -120,8 +129,7 @@ async function runSecurityAudit() {
       console.log(`  Panic: ${err.message.split('\n')[0]}`);
       passed++;
     } else {
-      console.log(`  [PASS] Blocked with contract panic: ${err.message.split('\n')[0]}`);
-      passed++;
+      console.error(`  [FAIL] Unexpected error type: ${err.message}`);
     }
   }
 
@@ -136,21 +144,26 @@ async function runSecurityAudit() {
       actions: [actions.functionCall('propose_payment', {
         recipient: "aws.testnet",
         amount: yocto,
-        memo: "Legitimate agent cloud compute refill"
+        memo: "Legitimate agent compute refill"
       }, gasLimit, BigInt(0))]
     });
 
-    const txHash = result.transaction ? result.transaction.hash : (result.transaction_outcome ? result.transaction_outcome.id : "CONFIRMED");
-    console.log(`  [PASS] Successfully proposed & settled by Smart Contract!`);
-    console.log(`  Tx Hash: ${txHash}`);
-    console.log(`  Explorer: https://testnet.nearblocks.io/txns/${txHash}`);
-    passed++;
+    if (result.status && result.status.SuccessValue) {
+      const decoded = JSON.parse(Buffer.from(result.status.SuccessValue, 'base64').toString());
+      const txHash = result.transaction ? result.transaction.hash : (result.transaction_outcome ? result.transaction_outcome.id : "CONFIRMED");
+      console.log(`  [PASS] Successfully proposed to Smart Contract (State: ${decoded.state})!`);
+      console.log(`  Tx Hash: ${txHash}`);
+      console.log(`  Explorer: https://testnet.nearblocks.io/txns/${txHash}`);
+      passed++;
+    } else {
+      throw new Error(`Transaction returned unexpected status: ${JSON.stringify(result.status)}`);
+    }
   } catch (err) {
     console.error(`  [FAIL] Legitimate proposal failed: ${err.message}`);
   }
 
   console.log("\n===============================================================================");
-  console.log(` Red-Team Security Audit Results: ${passed}/${total} PASS (100% Defense Guaranteed)`);
+  console.log(` Red-Team Security Audit Results: ${passed}/${total} PASS`);
   console.log("===============================================================================");
 
   if (passed === total) {

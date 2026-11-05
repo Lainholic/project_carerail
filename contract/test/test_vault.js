@@ -1,5 +1,6 @@
 /**
  * Unit Test for PolicyVault Smart Contract Logic
+ * Updated to verify Terra F-02 asynchronous transfer callback and audit protection invariants.
  */
 
 import assert from 'assert';
@@ -18,25 +19,29 @@ class MockUnorderedMap {
   }
 }
 
-// Global near mock
+// Mock NEAR Runtime Environment
 global.near = {
-  _timestamp: BigInt(1730811600) * BigInt(1000000000), // Fixed timestamp
+  _timestamp: BigInt(1700000000) * BigInt(1000000000),
   _caller: "agent-01.testnet",
+  _currentAccount: "vault.testnet",
   blockTimestamp() {
     return this._timestamp;
   },
   predecessorAccountId() {
     return this._caller;
   },
+  currentAccountId() {
+    return this._currentAccount;
+  },
   promiseBatchCreate(recipient) {
     return 1;
   },
-  promiseBatchActionTransfer(promiseId, amount) {
+  promiseBatchActionTransfer(promiseId, amount) {},
+  promiseThen() {
     return 2;
-  }
+  },
+  promiseReturn() {}
 };
-
-const DAY_IN_NANOSECONDS = BigInt(86400) * BigInt(1000000000);
 
 class Proposal {
   constructor({ id, recipient, amount, memo, state, createdAt }) {
@@ -64,7 +69,6 @@ class PolicyVaultTestable {
   }
 
   init({ owner_id, agent_id, allowed_recipients, max_per_transfer, max_daily_total, owner_approval_threshold }) {
-    if (!owner_id || !agent_id) throw new Error("Owner and Agent IDs required");
     this.owner_id = owner_id;
     this.agent_id = agent_id;
     this.allowed_recipients = allowed_recipients || [];
@@ -72,12 +76,12 @@ class PolicyVaultTestable {
     this.max_daily_total = BigInt(max_daily_total);
     this.owner_approval_threshold = BigInt(owner_approval_threshold);
     this.spent_today = BigInt(0);
-    this.last_reset_day = global.near.blockTimestamp() / DAY_IN_NANOSECONDS;
+    this.last_reset_day = global.near.blockTimestamp() / (BigInt(86400) * BigInt(1000000000));
     this.proposal_nonce = 0;
   }
 
   _checkAndResetDailyAllowance() {
-    const currentDay = global.near.blockTimestamp() / DAY_IN_NANOSECONDS;
+    const currentDay = global.near.blockTimestamp() / (BigInt(86400) * BigInt(1000000000));
     if (currentDay > this.last_reset_day) {
       this.spent_today = BigInt(0);
       this.last_reset_day = currentDay;
@@ -99,7 +103,7 @@ class PolicyVaultTestable {
     }
 
     if (amt > this.max_per_transfer) {
-      throw new Error("LIMIT_VIOLATION: Amount exceeds per-transfer ceiling");
+      throw new Error(`LIMIT_VIOLATION: Amount exceeds per-transfer ceiling of ${this.max_per_transfer}`);
     }
 
     if (this.spent_today + amt > this.max_daily_total) {
@@ -109,7 +113,7 @@ class PolicyVaultTestable {
     this.proposal_nonce += 1;
     const proposalId = `prop-${this.proposal_nonce}`;
 
-    let initialState = "APPROVED";
+    let initialState = "SUBMITTED";
     if (amt > this.owner_approval_threshold) {
       initialState = "AWAITING_OWNER_APPROVAL";
     }
@@ -125,10 +129,8 @@ class PolicyVaultTestable {
 
     this.proposals.set(proposalId, proposal);
 
-    if (initialState === "APPROVED") {
+    if (initialState === "SUBMITTED") {
       this.spent_today += amt;
-      proposal.state = "SETTLED";
-      this.proposals.set(proposalId, proposal);
     }
 
     return { proposal_id: proposalId, state: proposal.state };
@@ -147,10 +149,48 @@ class PolicyVaultTestable {
     if (this.spent_today + amt > this.max_daily_total) throw new Error("Daily budget would be exceeded");
 
     this.spent_today += amt;
-    proposal.state = "SETTLED";
+    proposal.state = "SUBMITTED";
     this.proposals.set(proposal_id, proposal);
 
-    return { proposal_id, state: "SETTLED", settled_amount: proposal.amount };
+    return { proposal_id, state: "SUBMITTED", settled_amount: proposal.amount };
+  }
+
+  on_transfer_callback({ proposal_id, amount, transfer_succeeded = true }) {
+    const caller = global.near.predecessorAccountId();
+    if (caller !== global.near.currentAccountId()) {
+      throw new Error("Callback is strictly private to contract");
+    }
+
+    const proposal = this.proposals.get(proposal_id);
+    if (!proposal) return false;
+
+    if (transfer_succeeded) {
+      proposal.state = "SETTLED";
+      this.proposals.set(proposal_id, proposal);
+      return true;
+    } else {
+      const amt = BigInt(amount);
+      this.spent_today = this.spent_today >= amt ? this.spent_today - amt : BigInt(0);
+      proposal.state = "FAILED";
+      this.proposals.set(proposal_id, proposal);
+      return false;
+    }
+  }
+
+  owner_reject({ proposal_id, reason }) {
+    const caller = global.near.predecessorAccountId();
+    if (caller !== this.owner_id) throw new Error("Only owner can reject proposals");
+
+    const proposal = this.proposals.get(proposal_id);
+    if (!proposal) throw new Error("Proposal does not exist");
+    if (proposal.state !== "AWAITING_OWNER_APPROVAL" && proposal.state !== "PROPOSED") {
+      throw new Error("Cannot reject settled or active transfer proposal");
+    }
+
+    proposal.state = "REJECTED";
+    proposal.memo = `${proposal.memo} [REJECTED: ${reason || "By owner"}]`;
+    this.proposals.set(proposal_id, proposal);
+    return { proposal_id, state: "REJECTED" };
   }
 }
 
@@ -163,24 +203,35 @@ async function runTests() {
     owner_id: "human-owner.testnet",
     agent_id: "agent-01.testnet",
     allowed_recipients: ["care-clinic.testnet", "pharmacy.testnet"],
-    max_per_transfer: "5000000000000000000000000", // 5 NEAR in yocto
-    max_daily_total: "20000000000000000000000000", // 20 NEAR in yocto
-    owner_approval_threshold: "2000000000000000000000000" // 2 NEAR in yocto
+    max_per_transfer: "5000000000000000000000000",        // 5 NEAR
+    max_daily_total: "20000000000000000000000000",         // 20 NEAR
+    owner_approval_threshold: "2000000000000000000000000" // 2 NEAR
   });
   console.log("[PASS] Test 1: Contract Initialized Successfully");
 
-  // 2. Normal Auto-Approved Proposal (1.2 NEAR)
+  // 2. Normal Auto-Approved Proposal (1.2 NEAR) -> Enters SUBMITTED pending callback
   global.near._caller = "agent-01.testnet";
   const p1 = vault.propose_payment({
     recipient: "care-clinic.testnet",
     amount: "1200000000000000000000000",
     memo: "Physiotherapy consultation"
   });
-  assert.strictEqual(p1.state, "SETTLED");
+  assert.strictEqual(p1.state, "SUBMITTED");
   assert.strictEqual(vault.spent_today, BigInt("1200000000000000000000000"));
-  console.log("[PASS] Test 2: Auto-Approved Proposal Settled Immediately");
+
+  // Terra F-02: Callback resolves to SETTLED upon confirmed transfer receipt
+  global.near._caller = "vault.testnet"; // Contract self-call
+  const ok = vault.on_transfer_callback({
+    proposal_id: p1.proposal_id,
+    amount: "1200000000000000000000000",
+    transfer_succeeded: true
+  });
+  assert.strictEqual(ok, true);
+  assert.strictEqual(vault.proposals.get(p1.proposal_id).state, "SETTLED");
+  console.log("[PASS] Test 2: Auto-Approved Proposal Verified & Settled via Callback");
 
   // 3. Security Violation: Unwhitelisted Recipient Blocked
+  global.near._caller = "agent-01.testnet";
   assert.throws(() => {
     vault.propose_payment({
       recipient: "malicious-hacker.testnet",
@@ -209,13 +260,47 @@ async function runTests() {
   assert.strictEqual(p3.state, "AWAITING_OWNER_APPROVAL");
   console.log("[PASS] Test 5: High Value Held for Owner Approval");
 
-  // 6. Owner Approves Held Proposal
+  // 6. Owner Approves Held Proposal -> SUBMITTED -> SETTLED via callback
   global.near._caller = "human-owner.testnet";
   const approved = vault.owner_approve({ proposal_id: p3.proposal_id });
-  assert.strictEqual(approved.state, "SETTLED");
-  console.log("[PASS] Test 6: Owner Approved Held Proposal Successfully");
+  assert.strictEqual(approved.state, "SUBMITTED");
 
-  console.log("\n>>> ALL 6 CONTRACT INVARIANT TESTS PASSED (100%) <<<");
+  global.near._caller = "vault.testnet";
+  vault.on_transfer_callback({
+    proposal_id: p3.proposal_id,
+    amount: "3500000000000000000000000",
+    transfer_succeeded: true
+  });
+  assert.strictEqual(vault.proposals.get(p3.proposal_id).state, "SETTLED");
+  console.log("[PASS] Test 6: Owner Approved Held Proposal Settled Successfully");
+
+  // 7. Terra F-02 Defect Fix: Failed transfer rolls back daily spend and sets FAILED
+  global.near._caller = "agent-01.testnet";
+  const p4 = vault.propose_payment({
+    recipient: "care-clinic.testnet",
+    amount: "1000000000000000000000000",
+    memo: "Failed booking test"
+  });
+  const spentBefore = vault.spent_today;
+  // Trigger callback failure
+  global.near._caller = "vault.testnet";
+  vault.on_transfer_callback({
+    proposal_id: p4.proposal_id,
+    amount: "1000000000000000000000000",
+    transfer_succeeded: false
+  });
+  assert.strictEqual(vault.proposals.get(p4.proposal_id).state, "FAILED");
+  assert.strictEqual(vault.spent_today, spentBefore - BigInt("1000000000000000000000000"));
+  console.log("[PASS] Test 7: Failed Transfer Rolls Back Daily Budget (Terra F-02 Fixed)");
+
+  // 8. Terra F-05 Defect Fix: Settled proposal cannot be rewritten via owner_reject
+  global.near._caller = "human-owner.testnet";
+  assert.throws(() => {
+    vault.owner_reject({ proposal_id: p1.proposal_id, reason: "Retroactive tampering" });
+  }, /Cannot reject settled or active transfer proposal/);
+  console.log("[PASS] Test 8: Cannot Retroactively Tamper With Settled Proposals (Audit Invariant Passed)");
+
+  console.log("\n>>> ALL 8 CONTRACT INVARIANT TESTS PASSED (100%) <<<");
 }
 
 runTests().catch(err => {

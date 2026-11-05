@@ -1,5 +1,9 @@
 import os
+import sys
 import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from near_rail.crypto import NearKeyManager
 from policy.engine import CareRailEngine, PaymentProposal, PolicyRules, ProposalState
 from policy.owner_auth import Nep413Authorizer

@@ -3,7 +3,11 @@ Verifies full pipeline from agent instruction to policy gate, prompt injection d
 """
 
 import os
+import sys
 import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from agent.llm_agent import AutonomousCareAgent
 from near_rail.crypto import NearKeyManager
 from policy.engine import CareRailEngine, PolicyRules, ProposalState

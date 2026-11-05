@@ -8,7 +8,7 @@ class Proposal {
     this.recipient = recipient;
     this.amount = amount;
     this.memo = memo;
-    this.state = state; // "PROPOSED", "APPROVED", "REJECTED", "SETTLED"
+    this.state = state; // "PROPOSED", "AWAITING_OWNER_APPROVAL", "SUBMITTED", "SETTLED", "REJECTED", "FAILED"
     this.createdAt = createdAt;
   }
 }
@@ -32,7 +32,7 @@ export class PolicyVault {
   init({ owner_id, agent_id, allowed_recipients, max_per_transfer, max_daily_total, owner_approval_threshold }) {
     assert(owner_id.length > 0, "Owner ID cannot be empty");
     assert(agent_id.length > 0, "Agent ID cannot be empty");
-    
+
     this.owner_id = owner_id;
     this.agent_id = agent_id;
     this.allowed_recipients = allowed_recipients || [];
@@ -61,6 +61,8 @@ export class PolicyVault {
 
     this._checkAndResetDailyAllowance();
 
+    // Input sanitization: ensure valid positive BigInt
+    assert(typeof recipient === 'string' && recipient.length > 0, "Invalid recipient");
     const amt = BigInt(amount);
     assert(amt > BigInt(0), "Amount must be strictly positive");
 
@@ -78,7 +80,7 @@ export class PolicyVault {
     const proposalId = `prop-${this.proposal_nonce}`;
 
     // Guardrail 4: Human-in-the-Loop Threshold Check
-    let initialState = "APPROVED";
+    let initialState = "SUBMITTED";
     if (amt > this.owner_approval_threshold) {
       initialState = "AWAITING_OWNER_APPROVAL";
     }
@@ -94,13 +96,22 @@ export class PolicyVault {
 
     this.proposals.set(proposalId, proposal);
 
-    // If auto-approved, execute immediate settlement
-    if (initialState === "APPROVED") {
+    // If auto-approved (under threshold), initiate transfer promise with verified completion callback
+    if (initialState === "SUBMITTED") {
       this.spent_today += amt;
       const promiseId = near.promiseBatchCreate(recipient);
       near.promiseBatchActionTransfer(promiseId, amt);
-      proposal.state = "SETTLED";
-      this.proposals.set(proposalId, proposal);
+
+      // Terra F-02 fix: Asynchronous execution callback verifies real on-chain receipt before SETTLED
+      const callbackPromiseId = near.promiseThen(
+        promiseId,
+        near.currentAccountId(),
+        "on_transfer_callback",
+        JSON.stringify({ proposal_id: proposalId, amount: amt.toString() }),
+        0,
+        BigInt("10000000000000") // 10 Tgas
+      );
+      near.promiseReturn(callbackPromiseId);
     }
 
     return { proposal_id: proposalId, state: proposal.state };
@@ -121,16 +132,56 @@ export class PolicyVault {
     assert(this.spent_today + amt <= this.max_daily_total, "Daily budget would be exceeded");
 
     this.spent_today += amt;
-    proposal.state = "SETTLED";
+    proposal.state = "SUBMITTED";
     this.proposals.set(proposal_id, proposal);
 
-    // Execute on-chain transfer
+    // Execute on-chain transfer with verified callback
     const promiseId = near.promiseBatchCreate(proposal.recipient);
     near.promiseBatchActionTransfer(promiseId, amt);
-    return { proposal_id, state: "SETTLED", settled_amount: proposal.amount };
+
+    const callbackPromiseId = near.promiseThen(
+      promiseId,
+      near.currentAccountId(),
+      "on_transfer_callback",
+      JSON.stringify({ proposal_id: proposal_id, amount: amt.toString() }),
+      0,
+      BigInt("10000000000000") // 10 Tgas
+    );
+    near.promiseReturn(callbackPromiseId);
+
+    return { proposal_id, state: "SUBMITTED", settled_amount: proposal.amount };
   }
 
-  // --- Owner Rejection Function ---
+  // --- Private Asynchronous Transfer Callback (Terra F-02 Fix) ---
+  @call({})
+  on_transfer_callback({ proposal_id, amount }) {
+    // Strictly isolate callback to contract self-calls
+    assert(near.predecessorAccountId() === near.currentAccountId(), "Callback is strictly private to contract");
+
+    const proposal = this.proposals.get(proposal_id);
+    if (!proposal) return false;
+
+    // Verify whether the attached cross-account transfer receipt succeeded
+    try {
+      near.promiseResult(0);
+      proposal.state = "SETTLED";
+      this.proposals.set(proposal_id, proposal);
+      return true;
+    } catch (e) {
+      // Transfer failed on-chain! Rollback spent_today and mark as FAILED
+      const amt = BigInt(amount);
+      if (this.spent_today >= amt) {
+        this.spent_today -= amt;
+      } else {
+        this.spent_today = BigInt(0);
+      }
+      proposal.state = "FAILED";
+      this.proposals.set(proposal_id, proposal);
+      return false;
+    }
+  }
+
+  // --- Owner Rejection Function (Audit Protection Fix) ---
   @call({})
   owner_reject({ proposal_id, reason }) {
     const caller = near.predecessorAccountId();
@@ -138,6 +189,9 @@ export class PolicyVault {
 
     const proposal = this.proposals.get(proposal_id);
     assert(proposal !== null, "Proposal does not exist");
+
+    // Terra audit fix: Cannot alter already SETTLED or SUBMITTED proposals
+    assert(proposal.state === "AWAITING_OWNER_APPROVAL" || proposal.state === "PROPOSED", "Cannot reject settled or active transfer proposal");
 
     proposal.state = "REJECTED";
     proposal.memo = `${proposal.memo} [REJECTED: ${reason || "By owner"}]`;
