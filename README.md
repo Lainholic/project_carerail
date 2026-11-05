@@ -145,7 +145,9 @@ Following rigorous adversarial audits by **DeepSeek-V4.1-Flash** and **Terra (`g
 * **Live Red-Team Valid Proposal Tx**: [`H3TF7fztyb8wdnHLAJZVv1834HRb8v28foWQS95vtTi1`](https://testnet.nearblocks.io/txns/H3TF7fztyb8wdnHLAJZVv1834HRb8v28foWQS95vtTi1)
 * **Live Human-in-the-Loop Hold Tx**: [`D3LkzRC1bVskYaKyYfTwBe1EvoWYgjoBD1GJ1A2mymBq`](https://testnet.nearblocks.io/txns/D3LkzRC1bVskYaKyYfTwBe1EvoWYgjoBD1GJ1A2mymBq)
 * **Live Owner Approval Settlement Tx**: [`99yYJP78W3BetjDULkvwks8TZE4qqu1umra3eAKzpnh`](https://testnet.nearblocks.io/txns/99yYJP78W3BetjDULkvwks8TZE4qqu1umra3eAKzpnh)
-* **Visual Evidence**: `docs/carerail_dashboard_live_onchain.png`
+* **Official 1080p Walkthrough Video**: [`docs/carerail_demo_video.mp4`](docs/carerail_demo_video.mp4) (Full HD, 37s)
+* **Visual Verification Snapshot**: [`docs/carerail_demo_video_thumb.png`](docs/carerail_demo_video_thumb.png)
+* **Live Dashboard UI Screenshot**: [`docs/carerail_dashboard_live_onchain.png`](docs/carerail_dashboard_live_onchain.png)
 
 ---
 

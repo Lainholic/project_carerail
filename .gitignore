@@ -10,3 +10,4 @@ node_modules/
 tmp/
 *.db
 data/*.db
+contract/build/
