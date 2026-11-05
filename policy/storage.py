@@ -10,6 +10,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from typing import Dict, List, Optional, Tuple
 
 # 36 decimal places precision for yoctoNEAR level math (1 NEAR = 10^24 yocto)
@@ -58,7 +59,15 @@ class PersistentLedgerStorage:
                     tx_hash TEXT
                 )
             """)
-            # 4. Engine settings (pause state)
+            # 4. Consumed transaction hashes for replay & reuse protection (Terra Round 9 P0-2)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS consumed_tx_hashes (
+                    tx_hash TEXT PRIMARY KEY,
+                    proposal_id TEXT NOT NULL,
+                    consumed_at REAL NOT NULL
+                )
+            """)
+            # 5. Engine settings (pause state)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS engine_state (
                     key TEXT PRIMARY KEY,
@@ -162,9 +171,18 @@ class PersistentLedgerStorage:
                 return bool(int(row["value"]))
             return False
 
+    def is_tx_hash_consumed(self, tx_hash: str) -> bool:
+        """Terra Round 9 P0-2: Verify whether a transaction hash was already consumed."""
+        if not tx_hash:
+            return False
+        with self._lock:
+            cursor = self.conn.cursor()
+            row = cursor.execute("SELECT 1 FROM consumed_tx_hashes WHERE tx_hash = ?", (tx_hash,)).fetchone()
+            return row is not None
+
     def atomic_commit_spend(self, proposal_id: str, tx_hash: str, today_key: str, max_daily_budget: Decimal) -> Tuple[bool, str]:
-        """Atomically transitions an APPROVED proposal to CONFIRMED and updates spend ledger.
-        Wraps reservation release, spend accumulation, and proposal state change in a single transaction.
+        """Atomically transitions an APPROVED or UNKNOWN proposal to CONFIRMED and updates spend ledger.
+        Wraps reservation release, spend accumulation, consumed tx_hash recording, and proposal state change in a single transaction.
         """
         with self._lock:
             cursor = self.conn.cursor()
@@ -179,9 +197,16 @@ class PersistentLedgerStorage:
                 st_val = str(p["state"])
                 if st_val.startswith("ProposalState."):
                     st_val = st_val.split(".", 1)[1]
-                if st_val != "APPROVED":
+                if st_val not in ("APPROVED", "UNKNOWN"):
                     cursor.execute("ROLLBACK")
-                    return False, f"INVALID_STATE: Current state {p['state']} is not APPROVED"
+                    return False, f"INVALID_STATE: Current state {p['state']} is not APPROVED or UNKNOWN"
+
+                # Check tx_hash uniqueness to prevent replay attacks (Terra Round 9 P0-2)
+                if tx_hash:
+                    dup = cursor.execute("SELECT proposal_id FROM consumed_tx_hashes WHERE tx_hash = ?", (tx_hash,)).fetchone()
+                    if dup and dup["proposal_id"] != proposal_id:
+                        cursor.execute("ROLLBACK")
+                        return False, f"TX_HASH_REPLAY_DETECTED: Transaction {tx_hash} already consumed by proposal {dup['proposal_id']}"
 
                 amount = Decimal(str(p["amount_near"]))
                 submitted_day = p["submitted_day"]
@@ -213,6 +238,14 @@ class PersistentLedgerStorage:
                     VALUES (?, ?, '0')
                     ON CONFLICT(day_key) DO UPDATE SET settled_spend = ?
                 """, (today_key, str(new_today_settled), str(new_today_settled)))
+
+                # Record consumed transaction hash
+                if tx_hash:
+                    cursor.execute("""
+                        INSERT INTO consumed_tx_hashes (tx_hash, proposal_id, consumed_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(tx_hash) DO NOTHING
+                    """, (tx_hash, proposal_id, time.time()))
 
                 # Update proposal state
                 cursor.execute("""
@@ -276,3 +309,7 @@ class PersistentLedgerStorage:
                 self.conn.close()
             except Exception:
                 pass
+
+# Backward compatibility alias
+PolicyStorage = PersistentLedgerStorage
+

@@ -78,6 +78,9 @@ class TestCareRailPaymentTool(unittest.TestCase):
         self.assertTrue(res["success"])
         self.assertEqual(res["state"], "SIMULATED_SETTLED")
         self.assertIn("sim-tx-", res["tx_hash"])
+        # Invariant (Terra Round 9 P1-5): Live engine/storage must have ZERO proposals and ZERO nonces consumed
+        self.assertEqual(len(self.engine.proposals), 0)
+        self.assertEqual(len(self.engine.seen_nonces), 0)
 
     def test_firewall_blocks_prompt_injection(self):
         tool = CareRailPaymentTool(self.engine, agent_id="test-llm", simulation_mode=True)
@@ -128,24 +131,43 @@ class TestCareRailPaymentTool(unittest.TestCase):
         # Invariant (Terra Round 8 P0-1): Budget reservation must NOT be rolled back on unconfirmed broadcast to prevent double-spending
         self.assertLess(self.engine.get_remaining_daily_budget(), init_budget)
 
-    def test_terra_p1_dispatch_failure_rolls_back_reservation(self):
-        """Terra Round 6 P1-5: If on-chain broadcast fails, reserved funds must be rolled back."""
+    def test_terra_p1_preflight_dispatch_failure_rolls_back_reservation(self):
+        """Terra Round 6 P1-5 & Round 9: Definitive pre-broadcast failure safely releases reservation."""
         tool = CareRailPaymentTool(
             self.engine,
             agent_id="test-llm",
-            onchain_dispatcher=lambda r, a, m: (False, "RPC Network Timeout"),
+            onchain_dispatcher=lambda r, a, m: (False, "PRE_FLIGHT_VALIDATION_FAILED: Invalid signature"),
             simulation_mode=False
         )
         init_budget = self.engine.get_remaining_daily_budget()
         res = tool.execute(
             recipient="care-provider.testnet",
             amount_near=0.05,
-            intent_memo="Payment with failing RPC"
+            intent_memo="Payment with preflight rejection"
         )
         self.assertFalse(res["success"])
         self.assertEqual(res["state"], "DISPATCH_FAILED")
-        # Invariant: Budget reservation must be rolled back
+        # Invariant: Pre-broadcast failure safely rolls back reservation
         self.assertEqual(self.engine.get_remaining_daily_budget(), init_budget)
+
+    def test_terra_p0_ambiguous_network_timeout_locks_reservation(self):
+        """Terra Round 9 P0-1: Ambiguous network timeout must NOT release reservation to prevent double-spending."""
+        tool = CareRailPaymentTool(
+            self.engine,
+            agent_id="test-llm",
+            onchain_dispatcher=lambda r, a, m: (False, "RPC Network Timeout: Socket closed"),
+            simulation_mode=False
+        )
+        init_budget = self.engine.get_remaining_daily_budget()
+        res = tool.execute(
+            recipient="care-provider.testnet",
+            amount_near=0.05,
+            intent_memo="Payment with network drop"
+        )
+        self.assertFalse(res["success"])
+        self.assertEqual(res["state"], "PENDING_RECONCILIATION")
+        # Invariant (P0-1): Ambiguous failure MUST keep reservation locked to prevent double-spending
+        self.assertLess(self.engine.get_remaining_daily_budget(), init_budget)
 
 
 if __name__ == "__main__":

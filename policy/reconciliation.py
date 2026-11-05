@@ -16,9 +16,11 @@ YOCTO_PER_NEAR = Decimal("1000000000000000000000000")
 
 
 class NearReconciliationVerifier:
-    def __init__(self, rpc_url: str = "https://rpc.testnet.fastnear.com", timeout_seconds: int = 5):
+    def __init__(self, rpc_url: str = "https://rpc.testnet.fastnear.com", timeout_seconds: int = 5, storage=None):
         self.rpc_url = rpc_url
         self.timeout = timeout_seconds
+        self.storage = storage
+        self.consumed_tx_hashes = set()
 
     def query_tx_status(self, tx_hash: str, sender_id: str) -> Tuple[bool, Optional[dict], str]:
         """Queries NEAR RPC for transaction outcome."""
@@ -81,6 +83,12 @@ class NearReconciliationVerifier:
         """
         if allow_mock and (tx_hash.startswith("mock-") or tx_hash.startswith("sim-")):
             return True, "MOCK_VERIFIED_SUCCESS"
+
+        # Check transaction hash replay / reuse (Terra Round 9 P0-2)
+        if self.storage and self.storage.is_tx_hash_consumed(tx_hash):
+            return False, f"TX_HASH_ALREADY_CONSUMED: Transaction {tx_hash} was previously reconciled in persistent storage"
+        if tx_hash in self.consumed_tx_hashes:
+            return False, f"TX_HASH_ALREADY_CONSUMED: Transaction {tx_hash} was previously reconciled in current session"
 
         success, res, msg = self.query_tx_status(tx_hash, sender_id)
         if not success:
@@ -146,15 +154,22 @@ class NearReconciliationVerifier:
                 # Boolean True confirms on_transfer_callback settled successfully
             elif isinstance(ret_json, dict):
                 prop_state = ret_json.get("state")
+                if not prop_state:
+                    return False, "INCOMPLETE_RETURN_VALUE: Proposal state is missing in return payload"
                 if prop_state == "AWAITING_OWNER_APPROVAL":
                     return False, "PAYMENT_NOT_SETTLED_YET: Proposal held in AWAITING_OWNER_APPROVAL state"
-                if prop_state and prop_state not in ("SUBMITTED", "SETTLED"):
+                if prop_state not in ("SUBMITTED", "SETTLED"):
                     return False, f"UNEXPECTED_PROPOSAL_STATE: Proposal is in '{prop_state}', not SUBMITTED/SETTLED"
-                if expected_proposal_id and ret_json.get("proposal_id") and ret_json.get("proposal_id") != expected_proposal_id:
+                if expected_proposal_id and ret_json.get("proposal_id") != expected_proposal_id:
                     return False, f"PROPOSAL_ID_MISMATCH: Expected {expected_proposal_id}, got {ret_json.get('proposal_id')}"
+                if expected_recipient and ret_json.get("recipient") and ret_json.get("recipient") != expected_recipient:
+                    return False, f"RECIPIENT_MISMATCH: Expected {expected_recipient}, got {ret_json.get('recipient')}"
+                if expected_amount_near and ret_json.get("amount") and str(ret_json.get("amount")) != str(expected_yocto):
+                    return False, f"AMOUNT_MISMATCH: Expected {expected_yocto} yocto, got {ret_json.get('amount')}"
             else:
                 return False, f"UNEXPECTED_RETURN_TYPE: Expected boolean or JSON object, got {type(ret_json).__name__}"
         except Exception as ret_err:
             return False, f"RETURN_VALUE_DECODING_ERROR: {str(ret_err)}"
 
+        self.consumed_tx_hashes.add(tx_hash)
         return True, "ONCHAIN_RECONCILIATION_VERIFIED"

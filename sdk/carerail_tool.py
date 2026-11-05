@@ -38,10 +38,31 @@ class CareRailPaymentTool:
         self.engine = engine
         self.agent_id = agent_id
         self.onchain_dispatcher = onchain_dispatcher
-        self.verifier = verifier if verifier is not None else (NearReconciliationVerifier() if not simulation_mode else None)
         self.contract_id = contract_id
         self.simulation_mode = simulation_mode
         self._nonce_counter = int(time.time() * 1000)
+
+        # Terra Round 9 P1-5: True Isolated Simulation Engine (Zero Live State Mutation)
+        if self.simulation_mode:
+            from policy.engine import CareRailEngine
+            self.sim_engine = CareRailEngine(
+                rules=self.engine.rules,
+                db_path=":memory:"
+            )
+            # Synchronize today's spent headroom snapshot without mutating live DB
+            today_key = self.engine._get_today_key()
+            live_spent, _ = self.engine.storage.get_daily_ledger(today_key)
+            self.sim_engine.storage.set_daily_spend(today_key, live_spent)
+            self.sim_engine.daily_spend_ledger[today_key] = live_spent
+        else:
+            self.sim_engine = None
+
+        if verifier is not None:
+            self.verifier = verifier
+        elif not simulation_mode:
+            self.verifier = NearReconciliationVerifier(storage=self.engine.storage)
+        else:
+            self.verifier = None
 
     def _get_next_nonce(self) -> int:
         self._nonce_counter += 1
@@ -94,7 +115,9 @@ class CareRailPaymentTool:
         )
 
         # 1. Gate evaluation through deterministic FSM policy engine
-        state, reason = self.engine.evaluate_proposal(proposal)
+        # In simulation mode, evaluate strictly on ephemeral memory engine to guarantee zero live mutation (Terra Round 9 P1-5)
+        target_engine = self.sim_engine if self.simulation_mode else self.engine
+        state, reason = target_engine.evaluate_proposal(proposal)
 
         # 2. Case: REJECTED (Fail-Closed)
         if state == ProposalState.REJECTED:
@@ -124,9 +147,8 @@ class CareRailPaymentTool:
             real_tx_hash = None
 
             if self.simulation_mode:
-                # Isolated simulation mode - NEVER touches live blockchain and releases temp reservation (Terra Round 8 P1-3 Fixed)
+                # Isolated simulation mode - NEVER touches live blockchain or production DB (Terra Round 9 P1-5)
                 real_tx_hash = f"sim-tx-{proposal_id}-{int(time.time())}"
-                self.engine.release_reservation(proposal_id, reason="SIMULATION_COMPLETED")
                 return {
                     "success": True,
                     "state": "SIMULATED_SETTLED",
@@ -134,7 +156,7 @@ class CareRailPaymentTool:
                     "tx_hash": real_tx_hash,
                     "recipient": recipient,
                     "amount_near": float(proposal.amount_near),
-                    "remaining_daily_budget": self.engine.get_remaining_daily_budget(),
+                    "remaining_daily_budget": target_engine.get_remaining_daily_budget(),
                     "feedback_for_llm": f"SIMULATION_CONFIRMED: Policy approved {proposal.amount_near} NEAR transfer to {recipient}. (Simulation mode: zero live state mutated)."
                 }
             elif self.onchain_dispatcher:
@@ -150,19 +172,44 @@ class CareRailPaymentTool:
                     }
 
                 # Execute real on-chain transaction
-                dispatch_ok, dispatch_result = self.onchain_dispatcher(recipient, float(proposal.amount_near), intent_memo)
+                try:
+                    dispatch_ok, dispatch_result = self.onchain_dispatcher(recipient, float(proposal.amount_near), intent_memo)
+                except Exception as ex:
+                    dispatch_ok = False
+                    dispatch_result = f"DISPATCHER_EXCEPTION: {str(ex)}"
+
                 if not dispatch_ok:
-                    self.engine.release_reservation(proposal_id, reason=f"DISPATCH_FAILED: {dispatch_result}")
-                    return {
-                        "success": False,
-                        "state": "DISPATCH_FAILED",
-                        "proposal_id": proposal_id,
-                        "reason": f"ONCHAIN_BROADCAST_ERROR: {dispatch_result}",
-                        "feedback_for_llm": f"PAYMENT_FAILED: On-chain transaction execution failed: {dispatch_result}."
-                    }
+                    err_str = str(dispatch_result).upper()
+                    is_preflight = any(k in err_str for k in ("PRE_FLIGHT", "NOT_BROADCAST", "VALIDATION_FAILED", "REJECTED_BEFORE_SEND"))
+                    if is_preflight:
+                        # Definitive pre-broadcast failure: safe to release reservation
+                        self.engine.release_reservation(proposal_id, reason=f"DISPATCH_PREFLIGHT_FAILED: {dispatch_result}")
+                        return {
+                            "success": False,
+                            "state": "DISPATCH_FAILED",
+                            "proposal_id": proposal_id,
+                            "reason": f"ONCHAIN_BROADCAST_PREFLIGHT_ERROR: {dispatch_result}",
+                            "feedback_for_llm": f"PAYMENT_ABORTED: Pre-broadcast validation failed: {dispatch_result}. Reservation released."
+                        }
+                    else:
+                        # Terra Round 9 P0-1: Ambiguous failure (e.g. network timeout). Transaction may be in flight!
+                        # Retain reservation in UNKNOWN state to prevent double-spending.
+                        proposal.state = ProposalState.UNKNOWN
+                        self.engine.storage.save_proposal(proposal.__dict__)
+                        return {
+                            "success": False,
+                            "state": "PENDING_RECONCILIATION",
+                            "proposal_id": proposal_id,
+                            "reason": f"AMBIGUOUS_BROADCAST_STATUS: {dispatch_result}",
+                            "feedback_for_llm": (
+                                f"PAYMENT_AMBIGUOUS: Transaction submission status is unconfirmed ({dispatch_result}). "
+                                f"Budget reservation remains locked in UNKNOWN state to prevent double-spending. DO NOT retry."
+                            )
+                        }
+
                 real_tx_hash = dispatch_result
 
-                # Cross-verify with NearReconciliationVerifier before claiming SETTLED (Terra Round 6, 7, 8 Fixed)
+                # Cross-verify with NearReconciliationVerifier before claiming SETTLED (Terra Round 6, 7, 8, 9 Fixed)
                 rec_ok, rec_msg = self.verifier.verify_and_reconcile(
                     tx_hash=real_tx_hash,
                     sender_id=self.agent_id,
@@ -173,9 +220,10 @@ class CareRailPaymentTool:
                     allow_mock=False
                 )
                 if not rec_ok:
-                    # Invariant P0-1 (Terra Round 8): DO NOT release reservation on unverified broadcast.
-                    # Retain reservation to prevent double-spending; mark state as UNKNOWN / PENDING_RECONCILIATION.
+                    # Invariant P0-1: DO NOT release reservation on unverified broadcast.
+                    # Retain reservation and save tx_hash for future recovery.
                     proposal.state = ProposalState.UNKNOWN
+                    proposal.tx_hash = real_tx_hash
                     self.engine.storage.save_proposal(proposal.__dict__)
                     return {
                         "success": False,

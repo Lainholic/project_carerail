@@ -232,6 +232,106 @@ class TestNearReconciliationVerifier(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("PAYMENT_NOT_SETTLED_YET", msg)
 
+    @patch("urllib.request.urlopen")
+    def test_tx_hash_replay_rejected(self, mock_urlopen):
+        """Terra Round 9 P0-2: Same transaction hash cannot be reconciled twice."""
+        args_payload = json.dumps({
+            "recipient": "clinic.testnet",
+            "amount": str(int(Decimal("0.1") * YOCTO_PER_NEAR))
+        }).encode("utf-8")
+        args_b64 = base64.b64encode(args_payload).decode("utf-8")
+        ret_val = json.dumps({"proposal_id": "prop-1", "state": "SETTLED"}).encode("utf-8")
+        ret_val_b64 = base64.b64encode(ret_val).decode("utf-8")
+
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({
+            "jsonrpc": "2.0",
+            "result": {
+                "status": {"SuccessValue": ret_val_b64},
+                "receipts_outcome": [],
+                "transaction": {
+                    "receiver_id": "carerail-274071e4.testnet",
+                    "actions": [{
+                        "FunctionCall": {
+                            "method_name": "propose_payment",
+                            "args": args_b64
+                        }
+                    }]
+                }
+            },
+            "id": "rec-replay"
+        }).encode("utf-8")
+        mock_response.__enter__.return_value = mock_response
+        mock_urlopen.return_value = mock_response
+
+        # First reconciliation succeeds
+        ok1, msg1 = self.verifier.verify_and_reconcile(
+            tx_hash="tx-replay-101",
+            sender_id="agent.testnet",
+            contract_id="carerail-274071e4.testnet",
+            expected_recipient="clinic.testnet",
+            expected_amount_near=Decimal("0.1"),
+            expected_proposal_id="prop-1",
+            allow_mock=False
+        )
+        self.assertTrue(ok1)
+
+        # Second reconciliation with same tx_hash must fail closed
+        ok2, msg2 = self.verifier.verify_and_reconcile(
+            tx_hash="tx-replay-101",
+            sender_id="agent.testnet",
+            contract_id="carerail-274071e4.testnet",
+            expected_recipient="clinic.testnet",
+            expected_amount_near=Decimal("0.1"),
+            expected_proposal_id="prop-1",
+            allow_mock=False
+        )
+        self.assertFalse(ok2)
+        self.assertIn("TX_HASH_ALREADY_CONSUMED", msg2)
+
+    @patch("urllib.request.urlopen")
+    def test_dict_missing_state_rejected(self, mock_urlopen):
+        """Terra Round 9 P0-2: Incomplete return payload without state must fail closed."""
+        args_payload = json.dumps({
+            "recipient": "clinic.testnet",
+            "amount": str(int(Decimal("0.1") * YOCTO_PER_NEAR))
+        }).encode("utf-8")
+        args_b64 = base64.b64encode(args_payload).decode("utf-8")
+        ret_val = json.dumps({}).encode("utf-8") # Empty dictionary
+        ret_val_b64 = base64.b64encode(ret_val).decode("utf-8")
+
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({
+            "jsonrpc": "2.0",
+            "result": {
+                "status": {"SuccessValue": ret_val_b64},
+                "receipts_outcome": [],
+                "transaction": {
+                    "receiver_id": "carerail-274071e4.testnet",
+                    "actions": [{
+                        "FunctionCall": {
+                            "method_name": "propose_payment",
+                            "args": args_b64
+                        }
+                    }]
+                }
+            },
+            "id": "rec-empty"
+        }).encode("utf-8")
+        mock_response.__enter__.return_value = mock_response
+        mock_urlopen.return_value = mock_response
+
+        ok, msg = self.verifier.verify_and_reconcile(
+            tx_hash="tx-empty-state",
+            sender_id="agent.testnet",
+            contract_id="carerail-274071e4.testnet",
+            expected_recipient="clinic.testnet",
+            expected_amount_near=Decimal("0.1"),
+            allow_mock=False
+        )
+        self.assertFalse(ok)
+        self.assertIn("INCOMPLETE_RETURN_VALUE", msg)
+
 
 if __name__ == "__main__":
     unittest.main()

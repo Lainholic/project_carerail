@@ -30,7 +30,7 @@ async function deployAndInit() {
   try {
     const keyPair = KeyPair.fromString(privKey);
     const signer = new KeyPairSigner(keyPair);
-    const provider = new JsonRpcProvider({ url: 'https://rpc.testnet.near.org' });
+    const provider = new JsonRpcProvider({ url: 'https://test.rpc.fastnear.com' });
     const account = new Account(accountId, provider, signer);
 
     const wasmPath = path.resolve(__dirname, '..', 'contract', 'build', 'policy_vault.wasm');

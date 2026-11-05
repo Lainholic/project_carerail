@@ -340,6 +340,17 @@ class CareRailEngine:
         if owner_public_key != self.rules.owner_public_key:
             return False, f"KEY_MISMATCH: Provided key {owner_public_key} does not match authorized owner {self.rules.owner_public_key}"
 
+        # Re-check live policy constraints upon approval (Terra Round 9 P1-4)
+        if time.time() - proposal.created_at > self.rules.request_expiry_seconds:
+            return False, "REQUEST_EXPIRED: Proposal exceeded max validity window"
+
+        if proposal.recipient not in self.rules.allowed_recipients:
+            return False, f"SECURITY_ALERT: Recipient '{proposal.recipient}' is no longer in allowed whitelist"
+
+        amt_dec = _to_decimal(proposal.amount_near)
+        if amt_dec > self._max_per_tx_dec:
+            return False, f"LIMIT_EXCEEDED: Amount {proposal.amount_near} NEAR exceeds current per-transfer cap"
+
         from policy.owner_auth import Nep413Authorizer
         is_valid = Nep413Authorizer.verify_approval(
             owner_public_key=owner_public_key,
@@ -381,9 +392,10 @@ class CareRailEngine:
     def commit_spend(self, proposal_id: str, tx_hash: str) -> bool:
         """Records executed transaction, shifts reservation to settled daily spend.
         Invariant P0-A: Atomically executes under SQLite transaction and re-verifies headroom.
+        Supports both APPROVED and UNKNOWN (reconciliation recovery) states.
         """
         proposal = self.proposals.get(proposal_id)
-        if not proposal or proposal.state != ProposalState.APPROVED:
+        if not proposal or proposal.state not in (ProposalState.APPROVED, ProposalState.UNKNOWN):
             return False
 
         today_key = self._get_today_key()
@@ -423,3 +435,7 @@ class CareRailEngine:
             return True
 
         return False
+
+# Backward compatibility alias
+CareRailPolicyEngine = CareRailEngine
+

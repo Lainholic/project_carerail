@@ -108,8 +108,10 @@ export class PolicyVault {
     assert(amt <= this.max_per_transfer, `LIMIT_EXCEEDED: Proposal amount (${amt}) exceeds current max_per_transfer (${this.max_per_transfer})`);
     assert(this.spent_today + amt <= this.max_daily_total, "Daily budget would be exceeded");
 
-    // Cryptographic attestation recording
+    // Cryptographic attestation recording (Bounded byte lengths for DoS defense)
     if (owner_public_key && signature_b58) {
+      assert(owner_public_key.length <= 128, "SECURITY_ALERT: Public key exceeds 128 characters");
+      assert(signature_b58.length <= 256, "SECURITY_ALERT: Signature exceeds 256 characters");
       proposal.attestation = JSON.stringify({
         owner_public_key: owner_public_key,
         signature: signature_b58,
@@ -315,16 +317,28 @@ export class PolicyVault {
     assert(near.predecessorAccountId() === near.currentAccountId(), "Callback is strictly private to contract");
 
     const proposal = this.proposals.get(proposal_id);
-    if (!proposal) return false;
+    if (!proposal) return { proposal_id, state: "NOT_FOUND" };
     assert(proposal.state === "SUBMITTED", "Invalid callback state transition");
 
-    // Verify whether the attached cross-account transfer receipt succeeded
+    // Terra Round 9 P1-1: Wrap ONLY near.promiseResult(0) in try/catch to isolate transfer outcome
+    let transferSucceeded = false;
     try {
       near.promiseResult(0);
+      transferSucceeded = true;
+    } catch (e) {
+      transferSucceeded = false;
+    }
+
+    if (transferSucceeded) {
       proposal.state = "SETTLED";
       this.proposals.set(proposal_id, proposal);
-      return true;
-    } catch (e) {
+      return {
+        proposal_id,
+        state: "SETTLED",
+        recipient: proposal.recipient,
+        amount: proposal.amount
+      };
+    } else {
       const amt = BigInt(proposal.amount || amount);
       const submittedDay = BigInt(proposal.submittedDay || this.last_reset_day.toString());
       if (submittedDay === this.last_reset_day) {
@@ -336,15 +350,23 @@ export class PolicyVault {
       }
       proposal.state = "FAILED";
       this.proposals.set(proposal_id, proposal);
-      return false;
+      return {
+        proposal_id,
+        state: "FAILED",
+        recipient: proposal.recipient,
+        amount: proposal.amount
+      };
     }
   }
 
   // --- Owner Rejection Function (Strict FSM Protected) ---
   @call({})
   owner_reject({ proposal_id, reason }) {
+    assert(!this.is_paused, "SECURITY_ALERT: Vault is paused by emergency circuit breaker");
     const caller = near.predecessorAccountId();
     assert(caller === this.owner_id, "Only owner can reject proposals");
+
+    assert(!reason || reason.length <= 256, "SECURITY_ALERT: Rejection reason exceeds 256 character limit");
 
     const proposal = this.proposals.get(proposal_id);
     assert(proposal !== null, "Proposal does not exist");
