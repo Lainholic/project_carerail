@@ -122,10 +122,15 @@ class CareRailServerHandler(SimpleHTTPRequestHandler):
                     proposal_hash=prop.compute_hash(),
                     dry_run=False,
                 )
-                engine.commit_spend(prop.proposal_id, tx_res.get("transaction_hash", ""))
-                result["tx"] = tx_res
-                result["state"] = ProposalState.CONFIRMED.value
-                result["bot_response"] = f"예약 결제가 성공적으로 완료되었습니다 ({prop.amount_near} NEAR). 온체인 트랜잭션이 확정되었습니다."
+                tx_hash = tx_res.get("transaction_hash")
+                if tx_res.get("success") and tx_hash:
+                    engine.commit_spend(prop.proposal_id, tx_hash)
+                    result["tx"] = tx_res
+                    result["state"] = ProposalState.CONFIRMED.value
+                    result["bot_response"] = f"예약 결제가 성공적으로 완료되었습니다 ({prop.amount_near} NEAR). 온체인 트랜잭션이 확정되었습니다."
+                else:
+                    result["state"] = ProposalState.REJECTED.value
+                    result["bot_response"] = f"온체인 브로드캐스트 실패: {tx_res.get('error', 'Unknown error')}"
             elif state == ProposalState.AWAITING_OWNER_APPROVAL:
                 result["bot_response"] = f"요청 금액({prop.amount_near} NEAR)이 자율 한도(2.0 NEAR)를 초과하여 소유자 승인 대기 중입니다. 지문/서명 승인을 진행해주세요."
             else:
@@ -165,16 +170,23 @@ class CareRailServerHandler(SimpleHTTPRequestHandler):
                     proposal_hash=prop.compute_hash(),
                     dry_run=False,
                 )
-                engine.commit_spend(prop.proposal_id, tx_res.get("transaction_hash", ""))
-                result["tx"] = tx_res
-                result["state"] = ProposalState.CONFIRMED.value
+                tx_hash = tx_res.get("transaction_hash")
+                if tx_res.get("success") and tx_hash:
+                    engine.commit_spend(prop.proposal_id, tx_hash)
+                    result["tx"] = tx_res
+                    result["state"] = ProposalState.CONFIRMED.value
+                else:
+                    result["state"] = ProposalState.REJECTED.value
+                    result["reason"] = f"BROADCAST_FAILED: {tx_res.get('error')}"
 
             self._send_json(result)
             return
 
         if parsed.path == "/api/proposal/approve":
             proposal_id = body.get("proposal_id", "")
-            ok, msg = engine.owner_approve(proposal_id, "owner-webauthn-token-confirmed")
+            owner_pk = engine.rules.owner_public_key or "ed25519:6E8sCci9badyRkXb3JoRtubqwUMoVMMNaY2LTCSt6Z11"
+            sig_b58 = body.get("signature") or "simulated-sig-ed25519-valid"
+            ok, msg = engine.owner_approve(proposal_id, owner_pk, sig_b58)
             if not ok:
                 self._send_json({"error": msg}, status=400)
                 return
@@ -187,8 +199,12 @@ class CareRailServerHandler(SimpleHTTPRequestHandler):
                 proposal_hash=prop.compute_hash(),
                 dry_run=False,
             )
-            engine.commit_spend(proposal_id, tx_res.get("transaction_hash", ""))
-            self._send_json({"success": True, "state": "CONFIRMED", "tx": tx_res})
+            tx_hash = tx_res.get("transaction_hash")
+            if tx_res.get("success") and tx_hash:
+                engine.commit_spend(proposal_id, tx_hash)
+                self._send_json({"success": True, "state": "CONFIRMED", "tx": tx_res})
+            else:
+                self._send_json({"success": False, "state": "BROADCAST_FAILED", "error": tx_res.get("error")}, status=500)
             return
 
         self._send_json({"error": "Not Found"}, status=404)

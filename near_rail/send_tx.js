@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
-const { KeyPair, KeyPairSigner, JsonRpcProvider, Account, parseNearAmount, actions } = require('near-api-js');
+const { KeyPair, KeyPairSigner, Account, parseNearAmount, actions } = require('near-api-js');
+const { FailoverJsonRpcProvider } = require('./rpc_provider');
 
 // 1. Read .env file safely
 const envPath = path.resolve(__dirname, '..', '.env');
@@ -30,7 +31,7 @@ async function sendTransfer(recipient, amountNear) {
   try {
     const keyPair = KeyPair.fromString(privKey);
     const signer = new KeyPairSigner(keyPair);
-    const provider = new JsonRpcProvider({ url: 'https://test.rpc.fastnear.com' });
+    const provider = new FailoverJsonRpcProvider();
 
     const account = new Account(accountId, provider, signer);
 
