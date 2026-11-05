@@ -1,6 +1,7 @@
 """CareRail Persistent Ledger Storage
 Atomic SQLite3 backend for state persistence across process restarts.
 Guarantees nonce replay protection, daily spend, and budget reservation durability.
+Supports atomic multi-statement transactions under SQLite BEGIN IMMEDIATE.
 """
 
 import json
@@ -15,7 +16,7 @@ class PersistentLedgerStorage:
         self.db_path = db_path
         self._lock = threading.Lock()
         # Maintain a persistent connection instance
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self._init_db()
 
@@ -60,17 +61,20 @@ class PersistentLedgerStorage:
                     value TEXT NOT NULL
                 )
             """)
-            self.conn.commit()
 
     def is_nonce_consumed(self, nonce: int) -> bool:
         with self._lock:
             row = self.conn.execute("SELECT 1 FROM seen_nonces WHERE nonce = ?", (nonce,)).fetchone()
             return row is not None
 
-    def consume_nonce(self, nonce: int, timestamp: float):
+    def consume_nonce(self, nonce: int, timestamp: float) -> bool:
+        """Consumes a nonce. Returns True if inserted, False if already consumed."""
         with self._lock:
-            self.conn.execute("INSERT OR IGNORE INTO seen_nonces (nonce, consumed_at) VALUES (?, ?)", (nonce, timestamp))
-            self.conn.commit()
+            try:
+                self.conn.execute("INSERT INTO seen_nonces (nonce, consumed_at) VALUES (?, ?)", (nonce, timestamp))
+                return True
+            except sqlite3.IntegrityError:
+                return False
 
     def get_all_nonces(self) -> set:
         with self._lock:
@@ -85,6 +89,11 @@ class PersistentLedgerStorage:
                 return (float(row["settled_spend"]), float(row["reserved_spend"]))
             return (0.0, 0.0)
 
+    def get_all_daily_ledgers(self) -> Dict[str, Tuple[float, float]]:
+        with self._lock:
+            rows = self.conn.execute("SELECT day_key, settled_spend, reserved_spend FROM daily_ledgers").fetchall()
+            return {r["day_key"]: (float(r["settled_spend"]), float(r["reserved_spend"])) for r in rows}
+
     def set_daily_spend(self, day_key: str, amount: float):
         with self._lock:
             self.conn.execute("""
@@ -92,7 +101,6 @@ class PersistentLedgerStorage:
                 VALUES (?, ?, 0.0)
                 ON CONFLICT(day_key) DO UPDATE SET settled_spend = ?
             """, (day_key, amount, amount))
-            self.conn.commit()
 
     def set_daily_reserved(self, day_key: str, amount: float):
         with self._lock:
@@ -101,7 +109,6 @@ class PersistentLedgerStorage:
                 VALUES (?, 0.0, ?)
                 ON CONFLICT(day_key) DO UPDATE SET reserved_spend = ?
             """, (day_key, amount, amount))
-            self.conn.commit()
 
     def save_proposal(self, p_dict: dict):
         with self._lock:
@@ -120,7 +127,6 @@ class PersistentLedgerStorage:
                 p_dict["state"], p_dict["created_at"], p_dict["submitted_day"],
                 p_dict.get("rejection_reason"), p_dict.get("tx_hash")
             ))
-            self.conn.commit()
 
     def get_proposal(self, proposal_id: str) -> Optional[dict]:
         with self._lock:
@@ -137,7 +143,6 @@ class PersistentLedgerStorage:
     def set_pause_state(self, paused: bool):
         with self._lock:
             self.conn.execute("INSERT OR REPLACE INTO engine_state (key, value) VALUES ('is_paused', ?)", (str(int(paused)),))
-            self.conn.commit()
 
     def get_pause_state(self) -> bool:
         with self._lock:
@@ -145,6 +150,108 @@ class PersistentLedgerStorage:
             if row:
                 return bool(int(row["value"]))
             return False
+
+    def atomic_commit_spend(self, proposal_id: str, tx_hash: str, today_key: str, max_daily_budget: float) -> Tuple[bool, str]:
+        """Atomically transitions an APPROVED proposal to CONFIRMED and updates spend ledger.
+        Wraps reservation release, spend accumulation, and proposal state change in a single transaction.
+        """
+        with self._lock:
+            cursor = self.conn.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                row = cursor.execute("SELECT * FROM proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
+                if not row:
+                    cursor.execute("ROLLBACK")
+                    return False, "PROPOSAL_NOT_FOUND"
+
+                p = dict(row)
+                if p["state"] != "APPROVED":
+                    cursor.execute("ROLLBACK")
+                    return False, f"INVALID_STATE: Current state {p['state']} is not APPROVED"
+
+                amount = float(p["amount_near"])
+                submitted_day = p["submitted_day"]
+
+                # Fetch today's ledger
+                today_row = cursor.execute("SELECT settled_spend, reserved_spend FROM daily_ledgers WHERE day_key = ?", (today_key,)).fetchone()
+                today_settled = float(today_row["settled_spend"]) if today_row else 0.0
+                today_reserved = float(today_row["reserved_spend"]) if today_row else 0.0
+
+                # Cross-day budget check: if executed on a different day, ensure headroom exists
+                if submitted_day != today_key and (today_settled + today_reserved + amount > max_daily_budget):
+                    cursor.execute("ROLLBACK")
+                    return False, f"CROSS_DAY_BUDGET_EXCEEDED: Headroom insufficient on {today_key}"
+
+                # Release reservation on submitted day
+                sub_row = cursor.execute("SELECT reserved_spend FROM daily_ledgers WHERE day_key = ?", (submitted_day,)).fetchone()
+                sub_reserved = float(sub_row["reserved_spend"]) if sub_row else 0.0
+                new_sub_reserved = max(0.0, sub_reserved - amount)
+                cursor.execute("""
+                    INSERT INTO daily_ledgers (day_key, settled_spend, reserved_spend)
+                    VALUES (?, 0.0, ?)
+                    ON CONFLICT(day_key) DO UPDATE SET reserved_spend = ?
+                """, (submitted_day, new_sub_reserved, new_sub_reserved))
+
+                # Increment settled spend on today
+                new_today_settled = today_settled + amount
+                cursor.execute("""
+                    INSERT INTO daily_ledgers (day_key, settled_spend, reserved_spend)
+                    VALUES (?, ?, 0.0)
+                    ON CONFLICT(day_key) DO UPDATE SET settled_spend = ?
+                """, (today_key, new_today_settled, new_today_settled))
+
+                # Update proposal state
+                cursor.execute("""
+                    UPDATE proposals
+                    SET state = 'CONFIRMED', tx_hash = ?
+                    WHERE proposal_id = ?
+                """, (tx_hash, proposal_id))
+
+                cursor.execute("COMMIT")
+                return True, "SUCCESS"
+            except Exception as e:
+                cursor.execute("ROLLBACK")
+                return False, f"STORAGE_TRANSACTION_ERROR: {str(e)}"
+
+    def atomic_owner_reject(self, proposal_id: str, reason: str) -> Tuple[bool, str]:
+        """Atomically rejects a proposal and releases reservation if held."""
+        with self._lock:
+            cursor = self.conn.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                row = cursor.execute("SELECT * FROM proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
+                if not row:
+                    cursor.execute("ROLLBACK")
+                    return False, "PROPOSAL_NOT_FOUND"
+
+                p = dict(row)
+                if p["state"] not in ("AWAITING_OWNER_APPROVAL", "PROPOSED"):
+                    cursor.execute("ROLLBACK")
+                    return False, f"CANNOT_REWRITE_STATE: Proposal in state {p['state']} cannot be rejected"
+
+                if p["state"] == "AWAITING_OWNER_APPROVAL":
+                    day_key = p["submitted_day"]
+                    amount = float(p["amount_near"])
+                    cur_row = cursor.execute("SELECT reserved_spend FROM daily_ledgers WHERE day_key = ?", (day_key,)).fetchone()
+                    cur_res = float(cur_row["reserved_spend"]) if cur_row else 0.0
+                    new_res = max(0.0, cur_res - amount)
+                    cursor.execute("""
+                        INSERT INTO daily_ledgers (day_key, settled_spend, reserved_spend)
+                        VALUES (?, 0.0, ?)
+                        ON CONFLICT(day_key) DO UPDATE SET reserved_spend = ?
+                    """, (day_key, new_res, new_res))
+
+                cursor.execute("""
+                    UPDATE proposals
+                    SET state = 'REJECTED', rejection_reason = ?
+                    WHERE proposal_id = ?
+                """, (reason, proposal_id))
+
+                cursor.execute("COMMIT")
+                return True, "SUCCESS"
+            except Exception as e:
+                cursor.execute("ROLLBACK")
+                return False, f"STORAGE_TRANSACTION_ERROR: {str(e)}"
 
     def close(self):
         with self._lock:

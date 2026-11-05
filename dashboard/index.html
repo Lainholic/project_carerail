@@ -394,6 +394,9 @@
       <div class="logo-badge">CARERAIL</div>
       <h1>Autonomous Payment Firewall</h1>
       <span>NEAR Hackathon 2026</span>
+      <span style="background: rgba(255, 165, 2, 0.15); color: var(--accent-amber); border: 1px solid rgba(255, 165, 2, 0.3); border-radius: 4px; padding: 2px 8px; font-size: 11px; font-weight: 700; font-family: var(--font-mono); margin-left: 8px;">
+        LAB &amp; SIMULATION MODE
+      </span>
     </div>
     <div class="status-group">
       <div class="pill pill-green">
@@ -587,12 +590,12 @@
       status.innerText = 'FREEZE ACTIVATED';
       status.style.color = 'var(--accent-red)';
       btn.style.borderColor = 'var(--accent-red)';
-      log('🚨 EMERGENCY CIRCUIT BREAKER ACTIVATED! All transactions halted on-chain.', 'error');
+      log('🚨 EMERGENCY CIRCUIT BREAKER ACTIVATED! Local firewall freeze engaged (Call contract set_emergency_pause with owner key for on-chain freeze).', 'error');
     } else {
       status.innerText = 'ARMED (NORMAL)';
       status.style.color = 'var(--accent-green)';
       btn.style.borderColor = 'var(--card-border)';
-      log('🛡️ Emergency circuit breaker restored. Normal operation resumed.', 'success');
+      log('🛡️ Emergency circuit breaker restored. Normal firewall operation resumed.', 'success');
     }
   }
 

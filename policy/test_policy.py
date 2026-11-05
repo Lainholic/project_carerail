@@ -427,6 +427,66 @@ class TestCareRailEngine(unittest.TestCase):
             if os.path.exists(test_db):
                 os.remove(test_db)
 
+    def test_p1_b_pending_proposals_restored_and_approved_after_restart(self):
+        """Terra & DeepSeek P1-B Regression: Proposals awaiting owner approval must restore across restart and be approvable."""
+        test_db = os.path.join(os.path.dirname(__file__), "test_pending_restore.db")
+        if os.path.exists(test_db):
+            os.remove(test_db)
+
+        try:
+            # 1. First engine: create a proposal requiring human approval (3.0 NEAR > 2.0 NEAR threshold)
+            engine1 = CareRailEngine(self.rules, db_path=test_db)
+            p = PaymentProposal(
+                proposal_id="prop-pending-restore",
+                agent_id="agent-1",
+                recipient="care-provider.testnet",
+                amount_near=3.0,
+                intent_memo="Restoration audit proposal",
+                nonce=9991,
+            )
+            state, _ = engine1.evaluate_proposal(p)
+            self.assertEqual(state, ProposalState.AWAITING_OWNER_APPROVAL)
+            today_k = engine1._get_today_key()
+            self.assertEqual(engine1.daily_reserved_ledger[today_k], 3.0)
+
+            # 2. Hard restart: Destroy engine1 and instantiate engine2 from same SQLite file
+            engine1.storage.close()
+            del engine1
+
+            engine2 = CareRailEngine(self.rules, db_path=test_db)
+
+            # Invariant: Proposal must be loaded into memory proposals dict!
+            self.assertIn("prop-pending-restore", engine2.proposals)
+            restored_p = engine2.proposals["prop-pending-restore"]
+            self.assertEqual(restored_p.state, ProposalState.AWAITING_OWNER_APPROVAL)
+            self.assertEqual(restored_p.amount_near, 3.0)
+            self.assertEqual(engine2.daily_reserved_ledger[today_k], 3.0)
+
+            # Invariant: Owner approval on restored proposal must succeed!
+            sig = Nep413Authorizer.sign_approval(
+                owner_private_key_hex=self.owner_kp["private_key_raw_hex"],
+                proposal_id=restored_p.proposal_id,
+                amount_near=restored_p.amount_near,
+                recipient=restored_p.recipient,
+                nonce=restored_p.nonce,
+            )
+            ok, msg = engine2.owner_approve("prop-pending-restore", self.owner_kp["public_key"], sig)
+            self.assertTrue(ok)
+            self.assertEqual(restored_p.state, ProposalState.APPROVED)
+
+            # Invariant: Spend commitment on restored proposal must succeed atomically!
+            commit_ok = engine2.commit_spend("prop-pending-restore", "tx-restored-commit-hash")
+            self.assertTrue(commit_ok)
+            self.assertEqual(restored_p.state, ProposalState.CONFIRMED)
+            self.assertEqual(engine2.get_today_spent(), 3.0)
+            self.assertEqual(engine2.daily_reserved_ledger[today_k], 0.0)
+
+            engine2.storage.close()
+
+        finally:
+            if os.path.exists(test_db):
+                os.remove(test_db)
+
 
 if __name__ == "__main__":
     unittest.main()
