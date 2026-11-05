@@ -171,6 +171,86 @@ class PersistentLedgerStorage:
                 return bool(int(row["value"]))
             return False
 
+    def atomic_evaluate_and_reserve(
+        self,
+        proposal_id: str,
+        agent_id: str,
+        recipient: str,
+        amount_near: Decimal,
+        intent_memo: str,
+        nonce: int,
+        created_at: float,
+        today_key: str,
+        max_daily_budget: Decimal,
+        owner_threshold: Decimal
+    ) -> Tuple[bool, str, Decimal]:
+        """Terra Round 10 P0-1: Atomically checks daily headroom, consumes nonce,
+        increments reserved spend, and records proposal state in a single SQLite BEGIN IMMEDIATE transaction.
+        Returns: (success: bool, state_or_reason: str, new_reserved_spend: Decimal)
+        """
+        with self._lock:
+            cursor = self.conn.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+
+                # 1. Check emergency circuit breaker pause
+                pause_row = cursor.execute("SELECT value FROM engine_state WHERE key = 'is_paused'").fetchone()
+                if pause_row and bool(int(pause_row["value"])):
+                    cursor.execute("ROLLBACK")
+                    return False, "SECURITY_ALERT: Engine is paused by emergency circuit breaker", Decimal("0")
+
+                # 2. Check nonce replay
+                nonce_row = cursor.execute("SELECT 1 FROM seen_nonces WHERE nonce = ?", (nonce,)).fetchone()
+                if nonce_row:
+                    cursor.execute("ROLLBACK")
+                    return False, f"REPLAY_DETECTED: Nonce {nonce} already consumed", Decimal("0")
+
+                # 3. Check duplicate proposal ID
+                prop_row = cursor.execute("SELECT 1 FROM proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
+                if prop_row:
+                    cursor.execute("ROLLBACK")
+                    return False, f"DUPLICATE_PROPOSAL_ID: Proposal {proposal_id} already exists", Decimal("0")
+
+                # 4. Check daily budget headroom atomically from database
+                today_row = cursor.execute("SELECT settled_spend, reserved_spend FROM daily_ledgers WHERE day_key = ?", (today_key,)).fetchone()
+                today_settled = Decimal(str(today_row["settled_spend"])) if today_row else Decimal("0")
+                today_reserved = Decimal(str(today_row["reserved_spend"])) if today_row else Decimal("0")
+
+                if (today_settled + today_reserved + amount_near) > max_daily_budget:
+                    cursor.execute("ROLLBACK")
+                    return False, f"DAILY_CAP_EXCEEDED: Amount exceeds available daily budget (Settled: {float(today_settled)}, Reserved: {float(today_reserved)})", Decimal("0")
+
+                # 5. Consume nonce
+                cursor.execute("INSERT INTO seen_nonces (nonce, consumed_at) VALUES (?, ?)", (nonce, created_at))
+
+                # 6. Increment reservation
+                new_reserved = today_reserved + amount_near
+                cursor.execute("""
+                    INSERT INTO daily_ledgers (day_key, settled_spend, reserved_spend)
+                    VALUES (?, '0', ?)
+                    ON CONFLICT(day_key) DO UPDATE SET reserved_spend = ?
+                """, (today_key, str(new_reserved), str(new_reserved)))
+
+                # 7. Determine initial proposal state
+                state_str = "AWAITING_OWNER_APPROVAL" if amount_near > owner_threshold else "APPROVED"
+
+                # 8. Save proposal
+                cursor.execute("""
+                    INSERT INTO proposals (
+                        proposal_id, agent_id, recipient, amount_near, intent_memo,
+                        nonce, state, created_at, submitted_day, rejection_reason, tx_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                """, (
+                    proposal_id, agent_id, recipient, str(amount_near), intent_memo,
+                    nonce, state_str, created_at, today_key
+                ))
+
+                cursor.execute("COMMIT")
+                return True, state_str, new_reserved
+            except Exception as e:
+                cursor.execute("ROLLBACK")
+                return False, f"STORAGE_TRANSACTION_ERROR: {str(e)}", Decimal("0")
+
     def is_tx_hash_consumed(self, tx_hash: str) -> bool:
         """Terra Round 9 P0-2: Verify whether a transaction hash was already consumed."""
         if not tx_hash:
@@ -183,7 +263,11 @@ class PersistentLedgerStorage:
     def atomic_commit_spend(self, proposal_id: str, tx_hash: str, today_key: str, max_daily_budget: Decimal) -> Tuple[bool, str]:
         """Atomically transitions an APPROVED or UNKNOWN proposal to CONFIRMED and updates spend ledger.
         Wraps reservation release, spend accumulation, consumed tx_hash recording, and proposal state change in a single transaction.
+        Invariant P0-3: Strictly requires a valid non-empty on-chain transaction hash.
         """
+        if not tx_hash or len(tx_hash.strip()) < 4:
+            return False, "INVALID_TX_HASH: A valid on-chain transaction hash is strictly required to commit settlement"
+
         with self._lock:
             cursor = self.conn.cursor()
             try:

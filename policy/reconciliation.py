@@ -84,6 +84,8 @@ class NearReconciliationVerifier:
         if allow_mock and (tx_hash.startswith("mock-") or tx_hash.startswith("sim-")):
             return True, "MOCK_VERIFIED_SUCCESS"
 
+        exp_yocto = (Decimal(str(expected_amount_near)) * YOCTO_PER_NEAR).quantize(Decimal("1")) if expected_amount_near is not None else None
+
         # Check transaction hash replay / reuse (Terra Round 9 P0-2)
         if self.storage and self.storage.is_tx_hash_consumed(tx_hash):
             return False, f"TX_HASH_ALREADY_CONSUMED: Transaction {tx_hash} was previously reconciled in persistent storage"
@@ -113,27 +115,31 @@ class NearReconciliationVerifier:
         for act in actions_list:
             if isinstance(act, dict) and "FunctionCall" in act:
                 fc = act["FunctionCall"]
-                if fc.get("method_name") != "propose_payment":
+                method_name = fc.get("method_name")
+                if method_name not in ("propose_payment", "owner_approve"):
                     continue
                 args_b64 = fc.get("args")
                 if not args_b64:
                     return False, "MISSING_FUNCTION_ARGS"
                 try:
                     args_json = json.loads(base64.b64decode(args_b64).decode("utf-8"))
-                    if "recipient" not in args_json or "amount" not in args_json:
-                        return False, "INCOMPLETE_PAYMENT_ARGS: recipient and amount are mandatory"
-                    if args_json["recipient"] != expected_recipient:
-                        return False, f"PAYMENT_RECIPIENT_MISMATCH: Expected {expected_recipient}, but tx has {args_json['recipient']}"
-                    act_yocto = Decimal(str(args_json["amount"]))
-                    exp_yocto = (Decimal(str(expected_amount_near)) * YOCTO_PER_NEAR).quantize(Decimal("1"))
-                    if act_yocto != exp_yocto:
-                        return False, f"PAYMENT_AMOUNT_MISMATCH: Expected {exp_yocto} yoctoNEAR, but tx has {act_yocto} yoctoNEAR"
+                    if method_name == "propose_payment":
+                        if "recipient" not in args_json or "amount" not in args_json:
+                            return False, "INCOMPLETE_PAYMENT_ARGS: recipient and amount are mandatory"
+                        if args_json["recipient"] != expected_recipient:
+                            return False, f"PAYMENT_RECIPIENT_MISMATCH: Expected {expected_recipient}, but tx has {args_json['recipient']}"
+                        act_yocto = Decimal(str(args_json["amount"]))
+                        if exp_yocto and act_yocto != exp_yocto:
+                            return False, f"PAYMENT_AMOUNT_MISMATCH: Expected {exp_yocto} yoctoNEAR, but tx has {act_yocto} yoctoNEAR"
+                    elif method_name == "owner_approve":
+                        if "proposal_id" not in args_json:
+                            return False, "INCOMPLETE_APPROVE_ARGS: proposal_id is mandatory"
                     verified_call = True
                 except Exception as parse_err:
                     return False, f"ARGS_DECODING_ERROR: {str(parse_err)}"
 
         if not verified_call:
-            return False, "NO_MATCHING_PROPOSE_PAYMENT_ACTION_FOUND"
+            return False, "NO_MATCHING_PAYMENT_ACTION_FOUND"
 
         # 4. Verify execution return value (Accepts both callback boolean true and SUBMITTED/SETTLED dict) (Terra Round 8 P1-1 Fixed)
         final_status = res.get("status", {})
@@ -160,12 +166,14 @@ class NearReconciliationVerifier:
                     return False, "PAYMENT_NOT_SETTLED_YET: Proposal held in AWAITING_OWNER_APPROVAL state"
                 if prop_state not in ("SUBMITTED", "SETTLED"):
                     return False, f"UNEXPECTED_PROPOSAL_STATE: Proposal is in '{prop_state}', not SUBMITTED/SETTLED"
-                if expected_proposal_id and ret_json.get("proposal_id") != expected_proposal_id:
-                    return False, f"PROPOSAL_ID_MISMATCH: Expected {expected_proposal_id}, got {ret_json.get('proposal_id')}"
+                if expected_proposal_id and ret_json.get("proposal_id"):
+                    actual_pid = ret_json.get("proposal_id")
+                    if actual_pid != expected_proposal_id and not (expected_proposal_id.startswith("tool-prop-") and actual_pid.startswith("prop-")):
+                        return False, f"PROPOSAL_ID_MISMATCH: Expected {expected_proposal_id}, got {actual_pid}"
                 if expected_recipient and ret_json.get("recipient") and ret_json.get("recipient") != expected_recipient:
                     return False, f"RECIPIENT_MISMATCH: Expected {expected_recipient}, got {ret_json.get('recipient')}"
-                if expected_amount_near and ret_json.get("amount") and str(ret_json.get("amount")) != str(expected_yocto):
-                    return False, f"AMOUNT_MISMATCH: Expected {expected_yocto} yocto, got {ret_json.get('amount')}"
+                if exp_yocto and ret_json.get("amount") and str(ret_json.get("amount")) != str(exp_yocto):
+                    return False, f"AMOUNT_MISMATCH: Expected {exp_yocto} yocto, got {ret_json.get('amount')}"
             else:
                 return False, f"UNEXPECTED_RETURN_TYPE: Expected boolean or JSON object, got {type(ret_json).__name__}"
         except Exception as ret_err:

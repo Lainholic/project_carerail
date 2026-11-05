@@ -42,18 +42,23 @@ class CareRailPaymentTool:
         self.simulation_mode = simulation_mode
         self._nonce_counter = int(time.time() * 1000)
 
-        # Terra Round 9 P1-5: True Isolated Simulation Engine (Zero Live State Mutation)
+        # Terra Round 9 & 10: True Isolated Simulation Engine with complete live state snapshot
         if self.simulation_mode:
             from policy.engine import CareRailEngine
             self.sim_engine = CareRailEngine(
                 rules=self.engine.rules,
                 db_path=":memory:"
             )
-            # Synchronize today's spent headroom snapshot without mutating live DB
+            # Synchronize today's spent & reserved headroom and pause state without mutating live DB (Terra Round 10 P1-9)
             today_key = self.engine._get_today_key()
-            live_spent, _ = self.engine.storage.get_daily_ledger(today_key)
+            live_spent, live_res = self.engine.storage.get_daily_ledger(today_key)
             self.sim_engine.storage.set_daily_spend(today_key, live_spent)
+            self.sim_engine.storage.set_daily_reserved(today_key, live_res)
             self.sim_engine.daily_spend_ledger[today_key] = live_spent
+            self.sim_engine.daily_reserved_ledger[today_key] = live_res
+            if self.engine.storage.get_pause_state():
+                self.sim_engine.storage.set_pause_state(True)
+                self.sim_engine.is_paused = True
         else:
             self.sim_engine = None
 
@@ -96,13 +101,17 @@ class CareRailPaymentTool:
             }
         }
 
-    def execute(self, recipient: str, amount_near: Union[Decimal, float, str, int], intent_memo: str) -> Dict[str, Any]:
+    def execute(self, recipient: str, amount_near: Union[Decimal, float, str, int], intent_memo: str, client_idempotency_key: Optional[str] = None) -> Dict[str, Any]:
         """Evaluates and executes an agent payment request through the CareRail Firewall.
         Strict invariant: Never claims SETTLED or PAYMENT_CONFIRMED without a verified on-chain execution receipt.
+        Supports client_idempotency_key for durable payment-intent deduplication (Terra Round 10 P0-2).
         """
         nonce = self._get_next_nonce()
-        unique_suffix = uuid.uuid4().hex[:8]
-        proposal_id = f"tool-prop-{nonce}-{unique_suffix}"
+        if client_idempotency_key:
+            proposal_id = f"tool-prop-{client_idempotency_key}"
+        else:
+            unique_suffix = uuid.uuid4().hex[:8]
+            proposal_id = f"tool-prop-{nonce}-{unique_suffix}"
 
         amount_dec = _to_decimal(amount_near) if isinstance(amount_near, (int, float, str, Decimal)) else Decimal("0")
         proposal = PaymentProposal(
@@ -179,8 +188,8 @@ class CareRailPaymentTool:
                     dispatch_result = f"DISPATCHER_EXCEPTION: {str(ex)}"
 
                 if not dispatch_ok:
-                    err_str = str(dispatch_result).upper()
-                    is_preflight = any(k in err_str for k in ("PRE_FLIGHT", "NOT_BROADCAST", "VALIDATION_FAILED", "REJECTED_BEFORE_SEND"))
+                    # Strict prefix check: only unambiguous local pre-broadcast failures may release reservation (Terra Round 10 P0-4)
+                    is_preflight = dispatch_result.startswith("PRE_FLIGHT:") or dispatch_result.startswith("NOT_BROADCAST:")
                     if is_preflight:
                         # Definitive pre-broadcast failure: safe to release reservation
                         self.engine.release_reservation(proposal_id, reason=f"DISPATCH_PREFLIGHT_FAILED: {dispatch_result}")

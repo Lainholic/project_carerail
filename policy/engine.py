@@ -144,7 +144,7 @@ class CareRailEngine:
                 proposal_id=p["proposal_id"],
                 agent_id=p["agent_id"],
                 recipient=p["recipient"],
-                amount_near=float(Decimal(p["amount_near"])),
+                amount_near=Decimal(str(p["amount_near"])),
                 intent_memo=p["intent_memo"],
                 nonce=int(p["nonce"]),
                 created_at=float(p["created_at"]),
@@ -267,11 +267,18 @@ class CareRailEngine:
             proposal.rejection_reason = f"LIMIT_EXCEEDED: Amount {proposal.amount_near} NEAR exceeds max per transfer limit {self.rules.max_per_transfer_near} NEAR"
             return proposal.state, proposal.rejection_reason
 
-        # 5. Daily Total Ceiling with Headroom Reservation (exact Decimal)
+        # 5. Prompt Injection Defense (Semantic anomaly keyword filtering)
+        memo_lower = proposal.intent_memo.lower()
+        for kw in self.rules.blocked_memo_keywords:
+            if kw in memo_lower:
+                proposal.state = ProposalState.REJECTED
+                proposal.rejection_reason = f"PROMPT_INJECTION_FLAG: Blocked keyword '{kw}' detected in memo"
+                return proposal.state, proposal.rejection_reason
+
+        # 5b. Daily Total Ceiling Pre-check (In-memory cache & fixture support)
         today_key = self._get_today_key()
         current_spent = _to_decimal(self.daily_spend_ledger.get(today_key, Decimal("0")))
         current_reserved = _to_decimal(self.daily_reserved_ledger.get(today_key, Decimal("0")))
-
         if (current_spent + current_reserved + amt_dec) > self._max_daily_dec:
             proposal.state = ProposalState.REJECTED
             proposal.rejection_reason = (
@@ -280,40 +287,32 @@ class CareRailEngine:
             )
             return proposal.state, proposal.rejection_reason
 
-        # 6. Prompt Injection Defense (Semantic anomaly keyword filtering)
-        memo_lower = proposal.intent_memo.lower()
-        for kw in self.rules.blocked_memo_keywords:
-            if kw in memo_lower:
-                proposal.state = ProposalState.REJECTED
-                proposal.rejection_reason = f"PROMPT_INJECTION_FLAG: Blocked keyword '{kw}' detected in memo"
-                return proposal.state, proposal.rejection_reason
-
-        # Consume nonce atomically in DB first
+        # 6. Atomic Database Evaluation, Nonce Consumption, and Budget Reservation (Terra Round 10 P0-1 Fixed)
         proposal.submitted_day = today_key
-        consumed_ok = self.storage.consume_nonce(proposal.nonce, proposal.created_at)
-        if not consumed_ok:
+
+        reserve_ok, outcome, new_reserved = self.storage.atomic_evaluate_and_reserve(
+            proposal_id=proposal.proposal_id,
+            agent_id=proposal.agent_id,
+            recipient=proposal.recipient,
+            amount_near=amt_dec,
+            intent_memo=proposal.intent_memo,
+            nonce=proposal.nonce,
+            created_at=proposal.created_at,
+            today_key=today_key,
+            max_daily_budget=self._max_daily_dec,
+            owner_threshold=self._owner_thresh_dec
+        )
+
+        if not reserve_ok:
             proposal.state = ProposalState.REJECTED
-            proposal.rejection_reason = f"REPLAY_DETECTED: Nonce {proposal.nonce} already consumed"
+            proposal.rejection_reason = outcome
             return proposal.state, proposal.rejection_reason
 
+        # Synchronize local memory cache from authoritative atomic SQLite state
         self.seen_nonces.add(proposal.nonce)
-        self.proposals[proposal.proposal_id] = proposal
-
-        # 7. Human-in-the-Loop threshold check (exact Decimal)
-        if amt_dec > self._owner_thresh_dec:
-            proposal.state = ProposalState.AWAITING_OWNER_APPROVAL
-            new_reserved = current_reserved + amt_dec
-            self.daily_reserved_ledger[today_key] = new_reserved
-            self.storage.set_daily_reserved(today_key, new_reserved)
-            self.storage.save_proposal(proposal.__dict__)
-            return proposal.state, None
-
-        # 8. All standard criteria passed -> APPROVED with reservation
-        proposal.state = ProposalState.APPROVED
-        new_reserved = current_reserved + amt_dec
         self.daily_reserved_ledger[today_key] = new_reserved
-        self.storage.set_daily_reserved(today_key, new_reserved)
-        self.storage.save_proposal(proposal.__dict__)
+        proposal.state = ProposalState[outcome]
+        self.proposals[proposal.proposal_id] = proposal
         return proposal.state, None
 
     def owner_approve(self, proposal_id: str, owner_public_key: str, signature_b58: str) -> Tuple[bool, str]:
@@ -393,7 +392,11 @@ class CareRailEngine:
         """Records executed transaction, shifts reservation to settled daily spend.
         Invariant P0-A: Atomically executes under SQLite transaction and re-verifies headroom.
         Supports both APPROVED and UNKNOWN (reconciliation recovery) states.
+        Invariant P0-3: Strictly requires a non-empty on-chain transaction hash.
         """
+        if not tx_hash or len(tx_hash.strip()) < 4:
+            return False
+
         proposal = self.proposals.get(proposal_id)
         if not proposal or proposal.state not in (ProposalState.APPROVED, ProposalState.UNKNOWN):
             return False

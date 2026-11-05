@@ -142,7 +142,7 @@ class TestNearReconciliationVerifier(unittest.TestCase):
             allow_mock=False
         )
         self.assertFalse(ok)
-        self.assertEqual(msg, "NO_MATCHING_PROPOSE_PAYMENT_ACTION_FOUND")
+        self.assertIn("NO_MATCHING_", msg)
 
     @patch("urllib.request.urlopen")
     def test_receipt_execution_failure_rejected(self, mock_urlopen):

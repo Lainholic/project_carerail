@@ -136,7 +136,7 @@ class TestCareRailPaymentTool(unittest.TestCase):
         tool = CareRailPaymentTool(
             self.engine,
             agent_id="test-llm",
-            onchain_dispatcher=lambda r, a, m: (False, "PRE_FLIGHT_VALIDATION_FAILED: Invalid signature"),
+            onchain_dispatcher=lambda r, a, m: (False, "PRE_FLIGHT: Invalid signature format"),
             simulation_mode=False
         )
         init_budget = self.engine.get_remaining_daily_budget()
@@ -168,6 +168,33 @@ class TestCareRailPaymentTool(unittest.TestCase):
         self.assertEqual(res["state"], "PENDING_RECONCILIATION")
         # Invariant (P0-1): Ambiguous failure MUST keep reservation locked to prevent double-spending
         self.assertLess(self.engine.get_remaining_daily_budget(), init_budget)
+
+    def test_terra_p0_client_idempotency_key_prevents_duplicate_proposals(self):
+        """Terra Round 10 P0-2: Stable client idempotency key prevents duplicate payments on retry."""
+        tool = CareRailPaymentTool(
+            self.engine,
+            agent_id="test-llm",
+            simulation_mode=False,
+            onchain_dispatcher=None
+        )
+        res1 = tool.execute(
+            recipient="care-provider.testnet",
+            amount_near=0.05,
+            intent_memo="Inference API bill",
+            client_idempotency_key="invoice-7721"
+        )
+        self.assertEqual(res1["proposal_id"], "tool-prop-invoice-7721")
+
+        # Second attempt with identical client_idempotency_key must be rejected as duplicate
+        res2 = tool.execute(
+            recipient="care-provider.testnet",
+            amount_near=0.05,
+            intent_memo="Inference API bill",
+            client_idempotency_key="invoice-7721"
+        )
+        self.assertFalse(res2["success"])
+        self.assertEqual(res2["state"], "REJECTED")
+        self.assertIn("DUPLICATE_PROPOSAL_ID", res2["reason"])
 
 
 if __name__ == "__main__":
