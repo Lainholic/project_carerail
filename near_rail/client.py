@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional
 
 logger = logging.getLogger("NearRailClient")
 
-TESTNET_RPC_URL = "https://rpc.testnet.near.org"
+TESTNET_RPC_URL = "https://test.rpc.fastnear.com"
 
 
 class NearRailClient:

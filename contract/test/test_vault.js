@@ -2,7 +2,7 @@
  * Unit Test for PolicyVault Smart Contract Logic
  */
 
-const assert = require('assert');
+import assert from 'assert';
 
 // Mock Map to simulate NEAR UnorderedMap
 class MockUnorderedMap {
@@ -110,7 +110,7 @@ class PolicyVaultTestable {
     const proposalId = `prop-${this.proposal_nonce}`;
 
     let initialState = "APPROVED";
-    if (amt > this.owner_approval_threshold && caller !== this.owner_id) {
+    if (amt > this.owner_approval_threshold) {
       initialState = "AWAITING_OWNER_APPROVAL";
     }
 

@@ -2,6 +2,7 @@
   "name": "carerail-policy-vault",
   "version": "1.0.0",
   "description": "Deterministic On-Chain Policy Vault Contract for AI Agents on NEAR",
+  "type": "module",
   "main": "src/index.js",
   "scripts": {
     "build": "near-sdk-js build src/index.js build/policy_vault.wasm",

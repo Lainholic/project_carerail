@@ -79,7 +79,7 @@ export class PolicyVault {
 
     // Guardrail 4: Human-in-the-Loop Threshold Check
     let initialState = "APPROVED";
-    if (amt > this.owner_approval_threshold && caller !== this.owner_id) {
+    if (amt > this.owner_approval_threshold) {
       initialState = "AWAITING_OWNER_APPROVAL";
     }
 
@@ -97,8 +97,8 @@ export class PolicyVault {
     // If auto-approved, execute immediate settlement
     if (initialState === "APPROVED") {
       this.spent_today += amt;
-      near.promiseBatchCreate(recipient);
-      const promise = near.promiseBatchActionTransfer(near.promiseBatchCreate(recipient), amt);
+      const promiseId = near.promiseBatchCreate(recipient);
+      near.promiseBatchActionTransfer(promiseId, amt);
       proposal.state = "SETTLED";
       this.proposals.set(proposalId, proposal);
     }
@@ -125,7 +125,8 @@ export class PolicyVault {
     this.proposals.set(proposal_id, proposal);
 
     // Execute on-chain transfer
-    const promise = near.promiseBatchActionTransfer(near.promiseBatchCreate(proposal.recipient), amt);
+    const promiseId = near.promiseBatchCreate(proposal.recipient);
+    near.promiseBatchActionTransfer(promiseId, amt);
     return { proposal_id, state: "SETTLED", settled_amount: proposal.amount };
   }
 

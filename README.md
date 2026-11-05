@@ -4,7 +4,8 @@
 > **Primary Track**: `[ 06 / SEC ] AI Security & Defense`  
 > **Secondary Tracks**: `[ 07 / AGT ] Agent Economy`, `[ 04 / BUS ] Autonomous Business`  
 > **License**: MIT  
-> **On-Chain Account**: [`carerail-274071e4.testnet`](https://testnet.nearblocks.io/address/carerail-274071e4.testnet)  
+> **On-Chain Vault Contract**: [`carerail-274071e4.testnet`](https://testnet.nearblocks.io/address/carerail-274071e4.testnet)  
+> **Contract Deployment Tx**: [`BVrepmjvbKQ3pFcArrzTgi85kcBnHAH5uLpzk9gYy7PB`](https://testnet.nearblocks.io/txns/BVrepmjvbKQ3pFcArrzTgi85kcBnHAH5uLpzk9gYy7PB)  
 > **Live Testnet Settlement**: [`HcemShaNknpZsfsESYRDXeuBRLD9UBaCHBurBxjkXzZR`](https://testnet.nearblocks.io/txns/HcemShaNknpZsfsESYRDXeuBRLD9UBaCHBurBxjkXzZR)
 
 ---
@@ -65,22 +66,24 @@ PROPOSED ──> VALIDATING ──┬──> REJECTED (Fail-Closed)
 
 ## 4. Quickstart & Verification (For AI & Human Judges)
 
-Run the entire automated verification suite in under 4 seconds with zero external setup:
+Run the entire automated verification suite in under 12 seconds with zero external setup:
 
 ```bash
 # Clone the repository
 git clone https://github.com/<owner>/project_carerail.git
 cd project_carerail
 
-# Run full automated verification suite (Smart Contract + Python FSM + E2E + NEAR RPC)
+# Run full automated 6-suite verification (Contract + FSM + E2E LLM + Testnet + Red-Team + Human Approval)
 python verify_all.py
 ```
 
-### Verification Suite Coverage:
-* `contract/test/test_vault.js`: 6 Smart Contract Invariants (100% PASS)
-* `policy/test_policy.py`: 7 Policy Engine Rules (100% PASS)
-* `policy/test_owner_auth.py`: 2 NEP-413 Cryptographic Signature Verifications (100% PASS)
-* `test_e2e_scenarios.py`: 3 End-to-End LLM Prompt Injection Scenarios (100% PASS)
+### Verification Suite Coverage (6/6 Suites - 100% PASS):
+1. `contract/test/test_vault.js`: 6 Smart Contract Invariants (100% PASS)
+2. `policy/test_policy.py`: 7 Policy Engine Deterministic Rules (100% PASS)
+3. `test_e2e_scenarios.py`: 3 End-to-End LLM Prompt Injection Scenarios (100% PASS)
+4. `near_rail/client.py`: NEAR Official Testnet RPC Connectivity & Account State (100% PASS)
+5. `near_rail/test_onchain_security.js`: Live On-Chain Protocol Isolation & Red-Team Audit (100% PASS)
+6. `near_rail/test_human_approval.js`: Live On-Chain Human-in-the-Loop Threshold Hold & Owner Settlement (100% PASS)
 
 ---
 
@@ -104,15 +107,23 @@ python verify_all.py
 
 ## 6. Real On-Chain Evidence
 
-* **Account Creation**: [`HGUHdwd7k8sKCC2yQKzwqQqE3j3RX1tqYyE9SxCoi19s`](https://testnet.nearblocks.io/txns/HGUHdwd7k8sKCC2yQKzwqQqE3j3RX1tqYyE9SxCoi19s)
+* **Vault Contract Account**: [`carerail-274071e4.testnet`](https://testnet.nearblocks.io/address/carerail-274071e4.testnet)
+* **Contract Deploy Tx**: [`BVrepmjvbKQ3pFcArrzTgi85kcBnHAH5uLpzk9gYy7PB`](https://testnet.nearblocks.io/txns/BVrepmjvbKQ3pFcArrzTgi85kcBnHAH5uLpzk9gYy7PB)
+* **Contract Init Tx**: [`2J886vySAFRtaUKg6ioM2ULBpMmVmpeLARtd3LpiVdxF`](https://testnet.nearblocks.io/txns/2J886vySAFRtaUKg6ioM2ULBpMmVmpeLARtd3LpiVdxF)
+* **Agent Function Call Access Key Tx**: [`F3A9EBmBh9iukummvVjwkB7F2wbuxDoLNMN42BZQdeHM`](https://testnet.nearblocks.io/txns/F3A9EBmBh9iukummvVjwkB7F2wbuxDoLNMN42BZQdeHM)
 * **Live Testnet Settlement**: [`HcemShaNknpZsfsESYRDXeuBRLD9UBaCHBurBxjkXzZR`](https://testnet.nearblocks.io/txns/HcemShaNknpZsfsESYRDXeuBRLD9UBaCHBurBxjkXzZR)
+* **Live Contract Proposal (0.05 NEAR)**: [`27MQ5KaSW2jQzd6Jxe5HAfEto9xzESTKjyunZMdrMGff`](https://testnet.nearblocks.io/txns/27MQ5KaSW2jQzd6Jxe5HAfEto9xzESTKjyunZMdrMGff)
+* **Human-in-the-Loop Threshold Hold (0.2 NEAR)**: [`4DbCBiqFihJew94B72R9NicDD1sKLWXWhgn5fXK4xQ4R`](https://testnet.nearblocks.io/txns/4DbCBiqFihJew94B72R9NicDD1sKLWXWhgn5fXK4xQ4R)
+* **Owner Cryptographic Approval & Settlement**: [`6gUCDJ8CwdUx72tnoAYzZma7Wp96jc8VNVnSkvjkpfFm`](https://testnet.nearblocks.io/txns/6gUCDJ8CwdUx72tnoAYzZma7Wp96jc8VNVnSkvjkpfFm)
 * **Evidence Dashboard Screenshot**: `docs/carerail_dashboard_live_onchain.png`
+* **User Journey Demo Screenshot**: `docs/carerail_user_journey_demo.png`
 
 ---
 
-## 7. Security Invariants
+## 7. Security Invariants & Red-Team Defense
 
+* **Protocol-Level Access Key Isolation**: Agent keys are registered as `FunctionCallAccessKey` strictly restricted to `propose_payment` with an allowance limit. Direct `Transfer` or calls to unauthorized methods (`owner_approve`) are rejected at the NEAR protocol validator layer.
+* **On-Chain Policy Enforcement**: The deployed smart contract independently verifies whitelists, transfer limits, and daily caps, panicking on any violation before funds move.
 * **Fail-Closed by Design**: Any unexpected state or unhandled exception results in an immediate rejection.
 * **Key Isolation**: Signing access keys reside exclusively in the policy executor, strictly inaccessible to the agent.
-* **Idempotency & Replay Protection**: Nonce and unique proposal hashes prevent duplicate submissions.
 * **Cryptographic Authorization**: Human approvals enforce authentic Ed25519 NEP-413 signatures.
