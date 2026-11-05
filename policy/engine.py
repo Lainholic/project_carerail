@@ -152,8 +152,10 @@ class CareRailEngine:
         proposal.state = ProposalState.APPROVED
         return proposal.state, None
 
-    def owner_approve(self, proposal_id: str, owner_auth_token: str) -> Tuple[bool, str]:
-        """Owner manually approves a held transaction."""
+    def owner_approve(self, proposal_id: str, owner_auth_token: str = "", owner_public_key: str = "", signature_b58: str = "") -> Tuple[bool, str]:
+        """Owner manually approves a held transaction.
+        Supports both token authentication and cryptographic NEP-413 Ed25519 signature verification.
+        """
         proposal = self.proposals.get(proposal_id)
         if not proposal:
             return False, "Proposal not found"
@@ -161,8 +163,20 @@ class CareRailEngine:
         if proposal.state != ProposalState.AWAITING_OWNER_APPROVAL:
             return False, f"Invalid state transition from {proposal.state}"
 
-        # In production, owner_auth_token validates NEP-413 / WebAuthn cryptographic signature
-        if not owner_auth_token or len(owner_auth_token) < 8:
+        # If cryptographic signature is provided, verify via NEP-413
+        if owner_public_key and signature_b58:
+            from policy.owner_auth import Nep413Authorizer
+            is_valid = Nep413Authorizer.verify_approval(
+                owner_public_key=owner_public_key,
+                proposal_id=proposal.proposal_id,
+                amount_near=proposal.amount_near,
+                recipient=proposal.recipient,
+                nonce=proposal.nonce,
+                signature_b58=signature_b58,
+            )
+            if not is_valid:
+                return False, "CRYPTOGRAPHIC_VERIFICATION_FAILED: Invalid NEP-413 owner signature"
+        elif not owner_auth_token or len(owner_auth_token) < 8:
             return False, "Invalid owner authorization token"
 
         self.seen_nonces.add(proposal.nonce)
