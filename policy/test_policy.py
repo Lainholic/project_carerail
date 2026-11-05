@@ -371,6 +371,62 @@ class TestCareRailEngine(unittest.TestCase):
         self.assertEqual(p.state, ProposalState.APPROVED)
         self.assertEqual(self.engine.get_today_spent(), 8.0)
 
+    def test_p1_b_storage_persistence_across_process_restart(self):
+        """Terra P1-B: Proves that nonces, spend, reservations, and pause state persist across engine restarts."""
+        test_db = os.path.join(os.path.dirname(__file__), "test_persistence.db")
+        if os.path.exists(test_db):
+            os.remove(test_db)
+
+        try:
+            # 1. First engine lifecycle: Consume nonce, pause engine, and record spend
+            engine1 = CareRailEngine(self.rules, db_path=test_db)
+            engine1.set_emergency_pause(True)
+
+            p = PaymentProposal(
+                proposal_id="prop-persist-1",
+                agent_id="agent-1",
+                recipient="care-provider.testnet",
+                amount_near=1.0,
+                intent_memo="Persistence test",
+                nonce=8888,
+            )
+            # Unpause to evaluate
+            engine1.set_emergency_pause(False)
+            state, _ = engine1.evaluate_proposal(p)
+            self.assertEqual(state, ProposalState.APPROVED)
+            engine1.commit_spend("prop-persist-1", "tx-persist-hash")
+            self.assertEqual(engine1.get_today_spent(), 1.0)
+            engine1.set_emergency_pause(True) # Re-pause
+
+            # 2. Simulate complete process restart (brand new engine instance attached to same DB)
+            engine1.storage.close()
+            del engine1
+            engine2 = CareRailEngine(self.rules, db_path=test_db)
+
+            # Invariant: Pause state must survive restart!
+            self.assertTrue(engine2.is_paused)
+
+            # Invariant: Spent budget must survive restart!
+            self.assertEqual(engine2.get_today_spent(), 1.0)
+
+            # Invariant: Nonce 8888 must survive restart and block replay!
+            p_replay = PaymentProposal(
+                proposal_id="prop-persist-2",
+                agent_id="agent-1",
+                recipient="care-provider.testnet",
+                amount_near=1.0,
+                intent_memo="Persistence replay attempt",
+                nonce=8888,
+            )
+            state, reason = engine2.evaluate_proposal(p_replay)
+            self.assertEqual(state, ProposalState.REJECTED)
+            self.assertIn("REPLAY_DETECTED", reason)
+            engine2.storage.close()
+
+        finally:
+            if os.path.exists(test_db):
+                os.remove(test_db)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,7 @@ import math
 import os
 import time
 from typing import Dict, List, Optional, Tuple
+from policy.storage import PersistentLedgerStorage
 
 
 class ProposalState(str, Enum):
@@ -82,13 +83,20 @@ class PaymentProposal:
 
 
 class CareRailEngine:
-    def __init__(self, rules: PolicyRules):
+    def __init__(self, rules: PolicyRules, db_path: str = ":memory:"):
         self.rules = rules
+        self.storage = PersistentLedgerStorage(db_path)
         self.proposals: Dict[str, PaymentProposal] = {}
-        self.seen_nonces: set = set()
+        self.seen_nonces: set = self.storage.get_all_nonces()
         self.daily_spend_ledger: Dict[str, float] = {}      # Date string -> settled total NEAR
         self.daily_reserved_ledger: Dict[str, float] = {}   # Date string -> pending reserved NEAR
-        self.is_paused: bool = False
+        self.is_paused: bool = self.storage.get_pause_state()
+
+        # Restore today's ledger from storage
+        today_key = self._get_today_key()
+        settled, reserved = self.storage.get_daily_ledger(today_key)
+        self.daily_spend_ledger[today_key] = settled
+        self.daily_reserved_ledger[today_key] = reserved
 
     def _get_today_key(self) -> str:
         return time.strftime("%Y-%m-%d", time.gmtime())
@@ -105,6 +113,7 @@ class CareRailEngine:
 
     def set_emergency_pause(self, paused: bool) -> bool:
         self.is_paused = paused
+        self.storage.set_pause_state(paused)
         return self.is_paused
 
     def evaluate_proposal(self, proposal: PaymentProposal) -> Tuple[ProposalState, Optional[str]]:
@@ -184,17 +193,22 @@ class CareRailEngine:
         # Record proposal, submission day, and consume nonce
         proposal.submitted_day = today_key
         self.seen_nonces.add(proposal.nonce)
+        self.storage.consume_nonce(proposal.nonce, proposal.created_at)
         self.proposals[proposal.proposal_id] = proposal
 
         # 7. Human-in-the-Loop threshold check
         if proposal.amount_near > self.rules.owner_approval_threshold_near:
             proposal.state = ProposalState.AWAITING_OWNER_APPROVAL
             self.daily_reserved_ledger[today_key] = current_reserved + proposal.amount_near
+            self.storage.set_daily_reserved(today_key, self.daily_reserved_ledger[today_key])
+            self.storage.save_proposal(proposal.__dict__)
             return proposal.state, None
 
         # 8. All standard criteria passed -> APPROVED with reservation
         proposal.state = ProposalState.APPROVED
         self.daily_reserved_ledger[today_key] = current_reserved + proposal.amount_near
+        self.storage.set_daily_reserved(today_key, self.daily_reserved_ledger[today_key])
+        self.storage.save_proposal(proposal.__dict__)
         return proposal.state, None
 
     def owner_approve(self, proposal_id: str, owner_public_key: str, signature_b58: str) -> Tuple[bool, str]:
@@ -234,6 +248,7 @@ class CareRailEngine:
             return False, "CRYPTOGRAPHIC_VERIFICATION_FAILED: Invalid NEP-413 owner signature"
 
         proposal.state = ProposalState.APPROVED
+        self.storage.save_proposal(proposal.__dict__)
         return True, "Owner cryptographic approval accepted"
 
     def owner_reject(self, proposal_id: str, reason: str = "Rejected by owner") -> Tuple[bool, str]:
@@ -247,9 +262,11 @@ class CareRailEngine:
         if proposal.state == ProposalState.AWAITING_OWNER_APPROVAL:
             day_key = proposal.submitted_day
             self.daily_reserved_ledger[day_key] = max(0.0, self.daily_reserved_ledger.get(day_key, 0.0) - proposal.amount_near)
+            self.storage.set_daily_reserved(day_key, self.daily_reserved_ledger[day_key])
 
         proposal.state = ProposalState.REJECTED
         proposal.rejection_reason = reason
+        self.storage.save_proposal(proposal.__dict__)
         return True, "Proposal rejected by owner"
 
     def commit_spend(self, proposal_id: str, tx_hash: str) -> bool:
@@ -270,9 +287,12 @@ class CareRailEngine:
 
         # Release reservation from proposal's submitted day
         self.daily_reserved_ledger[day_key] = max(0.0, self.daily_reserved_ledger.get(day_key, 0.0) - proposal.amount_near)
+        self.storage.set_daily_reserved(day_key, self.daily_reserved_ledger[day_key])
         # Commit to spend on current day
         self.daily_spend_ledger[today_key] = today_spent + proposal.amount_near
+        self.storage.set_daily_spend(today_key, self.daily_spend_ledger[today_key])
 
         proposal.state = ProposalState.CONFIRMED
         proposal.tx_hash = tx_hash
+        self.storage.save_proposal(proposal.__dict__)
         return True

@@ -78,12 +78,28 @@ python verify_all.py
 ```
 
 ### Verification Suite Coverage (6/6 Suites - 100% PASS):
-1. `contract/test/test_vault.js`: 12 Smart Contract Invariants (Private callback isolation, day-boundary rollback, emergency killswitch, anti-dust floor) (100% PASS)
-2. `policy/test_policy.py`: 12 Policy Engine Deterministic Rules (Cryptographic owner binding, atomic reservation, strict FSM immutability) (100% PASS)
+1. `contract/test/test_vault.js`: 13 Smart Contract Invariants (Private callback isolation, day-boundary rollback, emergency killswitch, anti-dust floor, bounded memo) (100% PASS)
+2. `policy/test_policy.py`: 15 Policy Engine Deterministic Rules (Cryptographic owner binding, atomic reservation, cross-day budget re-verification, FSM object immutability, SQLite persistent ledger recovery) (100% PASS)
 3. `test_e2e_scenarios.py`: 3 End-to-End LLM Prompt Injection Scenarios (100% PASS)
 4. `near_rail/client.py`: NEAR Official Testnet RPC Connectivity & Account State (100% PASS)
 5. `near_rail/test_onchain_security.js`: Live On-Chain Protocol Isolation & Red-Team Audit (100% PASS)
 6. `near_rail/test_human_approval.js`: Live On-Chain Human-in-the-Loop Threshold Hold & Owner Settlement (100% PASS)
+
+---
+
+## 5. Live Cybersecurity Command Center Dashboard
+
+Launch the interactive security dashboard in one click:
+```bash
+# Windows Launcher
+open_dashboard.bat
+# Or directly view in browser
+open dashboard/index.html
+```
+* **Real-Time Traffic & Quota Monitoring**: Live visualization of FastNEAR RPC testnet connectivity and daily budget gauges.
+* **Interactive Red-Team Attack Simulator**: One-click execution of malicious prompt injection attacks to verify instant fail-closed blocking.
+* **NEP-413 Cryptographic Modal**: Visual human-in-the-loop authorization gate with real Ed25519 payload signatures.
+* **Emergency Circuit Breaker**: Instant on-chain freeze toggle for incident response.
 
 ---
 
