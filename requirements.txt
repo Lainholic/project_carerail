@@ -1,0 +1,7 @@
+# CareRail: Autonomous Payment Firewall for AI Agents on NEAR
+# Core Runtime & Verification Dependencies
+
+cryptography>=41.0.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+base58>=2.1.1

@@ -3,11 +3,11 @@
 > **Built for NEAR HACKATHON 2026**  
 > **Primary Track**: `[ 06 / SEC ] AI Security & Defense` (Agent Security, Function Call Keys, Attestation)  
 > **Secondary Tracks**: `[ 07 / AGT ] Agent Economy`, `[ 04 / BUS ] Autonomous Business`  
-> **Engineering Maturity**: **Security-Hardened Alpha / PoC** (Audited by DeepSeek-V4.1-Flash, Terra, and Annie)  
+> **Engineering Maturity**: **Security-Hardened Alpha / PoC** (Adversarial review by DeepSeek-V4.1-Flash, Terra, and Annie)  
 > **License**: MIT  
 > **On-Chain Vault Contract**: [`carerail-274071e4.testnet`](https://testnet.nearblocks.io/address/carerail-274071e4.testnet)  
 > **Latest Contract Upgrade Tx**: [`4JGC5y35GmdVfD8edKdX8frrAv2SBjyMWAW57M6CXVuG`](https://testnet.nearblocks.io/txns/4JGC5y35GmdVfD8edKdX8frrAv2SBjyMWAW57M6CXVuG)  
-> **Active Policy Invariants**: 22 On-Chain Invariants | 10 Automated Harness Suites (100% Invariants Verified)
+> **Active Policy Invariants**: 22 On-Chain Invariants | 12 Automated Harness Suites (100% Invariants Verified)
 
 ---
 
@@ -16,7 +16,7 @@
 Autonomous AI agents are increasingly entrusted with cryptocurrency wallets to purchase compute, pay API quotas, and transact with other agents. However, granting an LLM direct signing keys creates an unacceptable security hazard: **a single prompt injection, context escape, or hallucination can instantly drain the entire treasury to an adversary.**
 
 **CareRail** is a physical security air-gap and deterministic execution barrier that decouples untrusted LLM decision-making from cryptographic signing authorities:
-* **Zero Private Keys in Agent Context**: The LLM runtime can only formulate structured payment proposals. It possesses zero private keys.
+* **Zero Master/Transfer Keys in Agent Context**: The LLM runtime can only formulate structured payment proposals. It possesses zero master transfer keys and holds only a protocol-restricted FunctionCallAccessKey.
 * **Deterministic FSM Policy Engine**: Enforces fail-closed rules using exact Decimal arithmetic (IEEE-754 floating-point errors eliminated), atomic SQLite `BEGIN IMMEDIATE` budget reservations, and replay nonce deduplication.
 * **Engine Attestation**: Evaluated proposals receive an HMAC-SHA256 attestation ticket that binds proposal ID, recipient, yoctoNEAR amount, and nanosecond timestamp for on-chain verification.
 * **Cryptographic Human-in-the-Loop Gateway**: High-value transactions automatically transition to `AWAITING_OWNER_APPROVAL`, strictly requiring valid **NEP-413 Ed25519 cryptographic owner signatures**.
@@ -59,7 +59,7 @@ Autonomous AI agents are increasingly entrusted with cryptocurrency wallets to p
                                   (carerail-274071e4.testnet)
                                   - 22 On-Chain Invariants
                                   - Attestation Hash Verification
-                                  - 24h Governance Timelock
+                                  - 24h Governance Timelock (Policy updates only; payments settle upon Ed25519 owner sign-off)
                                   - Asynchronous Callback Isolation
 ```
 
@@ -85,7 +85,7 @@ PROPOSED ──> VALIDATING ──┬──> REJECTED (Fail-Closed)
 
 ---
 
-## 4. Quickstart: 10/10 Verification Harness (Judge Instructions)
+## 4. Quickstart: 12/12 Automated Verification Harness (Judge Instructions)
 
 Run the full automated verification harness in under 15 seconds:
 
@@ -94,7 +94,11 @@ Run the full automated verification harness in under 15 seconds:
 git clone https://github.com/Lainholic/project_carerail.git
 cd project_carerail
 
-# 2. Run complete automated 10-suite verification harness
+# 2. Install dependencies (Python & Node.js)
+pip install -r requirements.txt
+npm install
+
+# 3. Run complete automated 12-suite verification harness
 python verify_all.py
 ```
 
