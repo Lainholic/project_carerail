@@ -13,6 +13,84 @@
  */
 
 import assert from 'assert';
+import crypto from 'crypto';
+
+// Crypto helpers for test environment
+function utf8Encode(str) {
+  const bytes = [];
+  for (let i = 0; i < str.length; i++) {
+    let code = str.charCodeAt(i);
+    if (code < 0x80) {
+      bytes.push(code);
+    } else if (code < 0x800) {
+      bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+    } else if (code < 0xd800 || code >= 0xe000) {
+      bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+    } else {
+      i++;
+      const next = str.charCodeAt(i);
+      const cp = 0x10000 + (((code & 0x3ff) << 10) | (next & 0x3ff));
+      bytes.push(
+        0xf0 | (cp >> 18),
+        0x80 | ((cp >> 12) & 0x3f),
+        0x80 | ((cp >> 6) & 0x3f),
+        0x80 | (cp & 0x3f)
+      );
+    }
+  }
+  return new Uint8Array(bytes);
+}
+
+function bytesToHex(bytes) {
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
+function hmacSha256(keyBytes, messageBytes) {
+  const BLOCK = 64;
+  let key = keyBytes;
+  if (key.length > BLOCK) {
+    key = global.near.sha256(key);
+  }
+  const paddedKey = new Uint8Array(BLOCK);
+  paddedKey.set(key);
+
+  const ipad = new Uint8Array(BLOCK);
+  const opad = new Uint8Array(BLOCK);
+  for (let i = 0; i < BLOCK; i++) {
+    ipad[i] = paddedKey[i] ^ 0x36;
+    opad[i] = paddedKey[i] ^ 0x5c;
+  }
+
+  const inner = new Uint8Array(BLOCK + messageBytes.length);
+  inner.set(ipad, 0);
+  inner.set(messageBytes, BLOCK);
+  const innerHash = global.near.sha256(inner);
+
+  const outer = new Uint8Array(BLOCK + innerHash.length);
+  outer.set(opad, 0);
+  outer.set(innerHash, BLOCK);
+  return global.near.sha256(outer);
+}
+
+function hmacSha256Hex(keyStr, messageStr) {
+  const keyBytes = utf8Encode(keyStr);
+  const msgBytes = utf8Encode(messageStr);
+  return bytesToHex(hmacSha256(keyBytes, msgBytes));
+}
+
+function constantTimeEqualHex(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
 
 const DAY_IN_NANOSECONDS = BigInt(86400) * BigInt(1000000000);
 const MIN_TRANSFER_FLOOR = BigInt("1000000000000000000000"); // 0.001 NEAR
@@ -34,6 +112,24 @@ class MockUnorderedMap {
     this.store.set(key, val);
   }
 }
+
+class MockLookupMap {
+  constructor(prefix) {
+    this.prefix = prefix;
+    this.store = new Map();
+  }
+  containsKey(key) {
+    return this.store.has(key);
+  }
+  get(key) {
+    return this.store.get(key) || null;
+  }
+  set(key, val) {
+    this.store.set(key, val);
+  }
+}
+
+const attestationNonces = new MockLookupMap("uan");
 
 global.near = {
   _timestamp: BigInt(1700000000) * BigInt(1000000000),
@@ -59,6 +155,9 @@ global.near = {
   promiseReturn() {},
   log(msg) {
     this._logs.push(msg);
+  },
+  sha256(bytes) {
+    return new Uint8Array(crypto.createHash('sha256').update(Buffer.from(bytes)).digest());
   }
 };
 
@@ -90,9 +189,10 @@ class PolicyVaultTestable {
     this.pending_timelock_update = null;
     this.proposals = new MockUnorderedMap("p");
     this.proposal_nonce = 0;
+    this.engine_attestation_key = "";
   }
 
-  init({ owner_id, agent_id, allowed_recipients, max_per_transfer, max_daily_total, owner_approval_threshold }) {
+  init({ owner_id, agent_id, allowed_recipients, max_per_transfer, max_daily_total, owner_approval_threshold, engine_attestation_key }) {
     const perTransfer = BigInt(max_per_transfer);
     const dailyTotal = BigInt(max_daily_total);
     if (perTransfer > ABSOLUTE_MAX_PER_TRANSFER) throw new Error("max_per_transfer exceeds absolute protocol hard cap");
@@ -110,6 +210,7 @@ class PolicyVaultTestable {
     this.pending_count = 0;
     this.pending_timelock_update = null;
     this.proposal_nonce = 0;
+    this.engine_attestation_key = engine_attestation_key || "";
   }
 
   _checkAndResetDailyAllowance() {
@@ -120,6 +221,45 @@ class PolicyVaultTestable {
     }
   }
 
+  _verifyAttestation(attestationStr, caller, recipient, amt) {
+    if (!attestationStr || typeof attestationStr !== 'string') throw new Error("SECURITY_ALERT: Attestation required by policy vault");
+    let att = null;
+    try {
+      att = JSON.parse(attestationStr);
+    } catch (e) {
+      att = null;
+    }
+    if (!att || typeof att !== 'object') throw new Error("INVALID_ENGINE_ATTESTATION: Malformed JSON");
+    if (!att.engine_id) throw new Error("INVALID_ENGINE_ATTESTATION: Missing engine_id");
+    if (att.agent_id !== caller) throw new Error("INVALID_ENGINE_ATTESTATION: Caller agent mismatch");
+    if (att.recipient !== recipient) throw new Error("INVALID_ENGINE_ATTESTATION: Recipient mismatch");
+    if (att.amount_yocto !== amt.toString()) throw new Error("INVALID_ENGINE_ATTESTATION: Amount mismatch");
+    if (!att.nonce) throw new Error("INVALID_ENGINE_ATTESTATION: Missing nonce");
+    if (!att.expires_at) throw new Error("INVALID_ENGINE_ATTESTATION: Missing expires_at");
+    if (!att.sig_hash || att.sig_hash.length !== 64) throw new Error("INVALID_ENGINE_ATTESTATION: Invalid sig_hash format");
+
+    const currentTs = global.near.blockTimestamp();
+    const expiresAt = BigInt(att.expires_at);
+    if (expiresAt <= currentTs) throw new Error("INVALID_ENGINE_ATTESTATION: Attestation ticket expired");
+
+    const nonceKey = `nonce:${att.nonce}`;
+    if (attestationNonces.containsKey(nonceKey)) throw new Error("INVALID_ENGINE_ATTESTATION: Attestation nonce already consumed");
+
+    const canonical = `${att.engine_id}|${att.agent_id}|${att.recipient}|${att.amount_yocto}|${att.nonce}|${att.expires_at}`;
+    const expectedSig = hmacSha256Hex(this.engine_attestation_key, canonical);
+    if (!constantTimeEqualHex(expectedSig, att.sig_hash)) throw new Error("INVALID_ENGINE_ATTESTATION: Cryptographic signature mismatch");
+
+    attestationNonces.set(nonceKey, "1");
+  }
+
+  set_engine_attestation_key({ engine_attestation_key }) {
+    if (this.is_paused) throw new Error("SECURITY_ALERT: Vault is paused by emergency circuit breaker");
+    const caller = global.near.predecessorAccountId();
+    if (caller !== this.owner_id) throw new Error("Only owner can set engine attestation key");
+    this.engine_attestation_key = engine_attestation_key || "";
+    return { engine_attestation_key: this.engine_attestation_key };
+  }
+
   set_emergency_pause({ paused }) {
     const caller = global.near.predecessorAccountId();
     if (caller !== this.owner_id) throw new Error("Only owner can toggle emergency pause");
@@ -127,7 +267,7 @@ class PolicyVaultTestable {
     return { is_paused: this.is_paused };
   }
 
-  propose_payment({ recipient, amount, memo }) {
+  propose_payment({ recipient, amount, memo, attestation }) {
     if (this.is_paused) throw new Error("SECURITY_ALERT: Vault is paused by emergency circuit breaker");
 
     const caller = global.near.predecessorAccountId();
@@ -141,6 +281,10 @@ class PolicyVaultTestable {
     }
     const amt = BigInt(amount);
     if (amt <= BigInt(0)) throw new Error("Amount must be strictly positive");
+
+    if (this.engine_attestation_key && this.engine_attestation_key.length > 0) {
+      this._verifyAttestation(attestation, caller, recipient, amt);
+    }
 
     if (amt < MIN_TRANSFER_FLOOR) {
       throw new Error("SECURITY_ALERT: Amount below minimum floor (0.001 NEAR)");
@@ -621,7 +765,107 @@ async function runTests() {
   assert.ok(approveBlocked, "Approval of proposal exceeding newly reduced per-transfer cap MUST FAIL");
   console.log("[PASS] Test 19: Owner Approve Re-validates Against Current Reduced Limits (Terra Round 6 Fixed)");
 
-  console.log("\n>>> ALL 19 CONTRACT INVARIANT TESTS PASSED (100%) <<<");
+  // 20. [DeepSeek-V4.1-Flash Engineered] Engine Attestation Key Activation & Enforcement
+  global.near._caller = "human-owner.testnet";
+  const testSecret = "carerail-super-secure-secret-key-2026";
+  vault.set_engine_attestation_key({ engine_attestation_key: testSecret });
+  assert.strictEqual(vault.engine_attestation_key, testSecret);
+
+  // Now, agent attempts to propose payment without attestation -> MUST BE REJECTED!
+  global.near._caller = "agent-01.testnet";
+  assert.throws(() => {
+    vault.propose_payment({
+      recipient: "care-clinic.testnet",
+      amount: "500000000000000000000000", // 0.5 NEAR
+      memo: "Unattested Rogue Agent Proposal"
+    });
+  }, /SECURITY_ALERT: Attestation required by policy vault/);
+  console.log("[PASS] Test 20: Missing Attestation Rejected When Engine Key Configured");
+
+  // 21. [DeepSeek-V4.1-Flash Engineered] Tampered, Expired, and Replayed Attestations Blocked
+  const validEngineId = "carerail-engine-v1";
+  const validRecipient = "care-clinic.testnet";
+  const validAmt = "500000000000000000000000"; // 0.5 NEAR
+  const currentTs = global.near.blockTimestamp();
+  const futureExp = (currentTs + BigInt(60000000000)).toString(); // +60s
+  const nonce1 = "nonce-test-uuid-001";
+
+  // Create valid HMAC-SHA256 signature
+  const canonical1 = `${validEngineId}|agent-01.testnet|${validRecipient}|${validAmt}|${nonce1}|${futureExp}`;
+  const validSig = hmacSha256Hex(testSecret, canonical1);
+
+  // A. Tampered amount in ticket -> MUST FAIL!
+  const tamperedAtt = JSON.stringify({
+    engine_id: validEngineId,
+    agent_id: "agent-01.testnet",
+    recipient: validRecipient,
+    amount_yocto: "1000000000000000000000000", // Tampered amount
+    nonce: nonce1,
+    expires_at: futureExp,
+    sig_hash: validSig
+  });
+  assert.throws(() => {
+    vault.propose_payment({
+      recipient: validRecipient,
+      amount: validAmt,
+      memo: "Tampered Ticket",
+      attestation: tamperedAtt
+    });
+  }, /INVALID_ENGINE_ATTESTATION/);
+
+  // B. Expired attestation ticket -> MUST FAIL!
+  const pastExp = (currentTs - BigInt(1000000000)).toString(); // -1s
+  const expiredCanonical = `${validEngineId}|agent-01.testnet|${validRecipient}|${validAmt}|${nonce1}|${pastExp}`;
+  const expiredSig = hmacSha256Hex(testSecret, expiredCanonical);
+  const expiredAtt = JSON.stringify({
+    engine_id: validEngineId,
+    agent_id: "agent-01.testnet",
+    recipient: validRecipient,
+    amount_yocto: validAmt,
+    nonce: nonce1,
+    expires_at: pastExp,
+    sig_hash: expiredSig
+  });
+  assert.throws(() => {
+    vault.propose_payment({
+      recipient: validRecipient,
+      amount: validAmt,
+      memo: "Expired Ticket",
+      attestation: expiredAtt
+    });
+  }, /Attestation ticket expired/);
+
+  // C. Valid attestation -> MUST SUCCEED!
+  const validAtt = JSON.stringify({
+    engine_id: validEngineId,
+    agent_id: "agent-01.testnet",
+    recipient: validRecipient,
+    amount_yocto: validAmt,
+    nonce: nonce1,
+    expires_at: futureExp,
+    sig_hash: validSig
+  });
+  const attProp = vault.propose_payment({
+    recipient: validRecipient,
+    amount: validAmt,
+    memo: "Cryptographically Attested Proposal",
+    attestation: validAtt
+  });
+  assert.strictEqual(attProp.state, "SUBMITTED");
+  console.log("[PASS] Test 21: Tampered & Expired Attestations Blocked (Fail-Closed)");
+
+  // D. Replay of same attestation nonce -> MUST FAIL!
+  assert.throws(() => {
+    vault.propose_payment({
+      recipient: validRecipient,
+      amount: validAmt,
+      memo: "Replay Attempt",
+      attestation: validAtt
+    });
+  }, /Attestation nonce already consumed/);
+  console.log("[PASS] Test 22: Attestation Nonce Replay Blocked");
+
+  console.log("\n>>> ALL 22 CONTRACT INVARIANT TESTS PASSED (100%) <<<");
 }
 
 runTests().catch(err => {

@@ -1,13 +1,91 @@
-import { NearBindgen, call, view, initialize, near, UnorderedMap, assert } from 'near-sdk-js';
+import { NearBindgen, call, view, initialize, near, UnorderedMap, LookupMap, assert } from 'near-sdk-js';
 
 const DAY_IN_NANOSECONDS = BigInt(86400) * BigInt(1000000000);
 const MIN_TRANSFER_FLOOR = BigInt("1000000000000000000000"); // 0.001 NEAR (Anti-Dust Spam Floor)
 const MAX_PENDING_PROPOSALS = 50;
+const attestationNonces = new LookupMap("uan");
 
 // Security Constants: Absolute Protocol Caps and Governance Time-Lock (Verified by Annie)
 const ABSOLUTE_MAX_DAILY_LIMIT = BigInt("50000000000000000000000000"); // 50 NEAR absolute daily ceiling
 const ABSOLUTE_MAX_PER_TRANSFER = BigInt("10000000000000000000000000"); // 10 NEAR absolute per-tx ceiling
 const TIMELOCK_DURATION_NS = BigInt(86400) * BigInt(1000000000); // 24 hours governance cooldown
+
+// ============ Engine Attestation Cryptographic Helpers (QuickJS-safe) ============
+function utf8Encode(str) {
+  const bytes = [];
+  for (let i = 0; i < str.length; i++) {
+    let code = str.charCodeAt(i);
+    if (code < 0x80) {
+      bytes.push(code);
+    } else if (code < 0x800) {
+      bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+    } else if (code < 0xd800 || code >= 0xe000) {
+      bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+    } else {
+      i++;
+      const next = str.charCodeAt(i);
+      const cp = 0x10000 + (((code & 0x3ff) << 10) | (next & 0x3ff));
+      bytes.push(
+        0xf0 | (cp >> 18),
+        0x80 | ((cp >> 12) & 0x3f),
+        0x80 | ((cp >> 6) & 0x3f),
+        0x80 | (cp & 0x3f)
+      );
+    }
+  }
+  return new Uint8Array(bytes);
+}
+
+function bytesToHex(bytes) {
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
+function hmacSha256(keyBytes, messageBytes) {
+  const BLOCK = 64;
+  let key = keyBytes;
+  if (key.length > BLOCK) {
+    key = near.sha256(key);
+  }
+  const paddedKey = new Uint8Array(BLOCK);
+  paddedKey.set(key);
+
+  const ipad = new Uint8Array(BLOCK);
+  const opad = new Uint8Array(BLOCK);
+  for (let i = 0; i < BLOCK; i++) {
+    ipad[i] = paddedKey[i] ^ 0x36;
+    opad[i] = paddedKey[i] ^ 0x5c;
+  }
+
+  const inner = new Uint8Array(BLOCK + messageBytes.length);
+  inner.set(ipad, 0);
+  inner.set(messageBytes, BLOCK);
+  const innerHash = near.sha256(inner);
+
+  const outer = new Uint8Array(BLOCK + innerHash.length);
+  outer.set(opad, 0);
+  outer.set(innerHash, BLOCK);
+  return near.sha256(outer);
+}
+
+function hmacSha256Hex(keyStr, messageStr) {
+  const keyBytes = utf8Encode(keyStr);
+  const msgBytes = utf8Encode(messageStr);
+  return bytesToHex(hmacSha256(keyBytes, msgBytes));
+}
+
+function constantTimeEqualHex(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
 
 class Proposal {
   constructor({ id, recipient, amount, memo, state, createdAt, submittedDay, attestation }) {
@@ -40,10 +118,11 @@ export class PolicyVault {
     this.pending_timelock_update = ""; // Serialized JSON string or empty string
     this.proposals = new UnorderedMap("p");
     this.proposal_nonce = 0;
+    this.engine_attestation_key = ""; // Shared HMAC secret or empty string
   }
 
   @initialize({})
-  init({ owner_id, agent_id, allowed_recipients, max_per_transfer, max_daily_total, owner_approval_threshold }) {
+  init({ owner_id, agent_id, allowed_recipients, max_per_transfer, max_daily_total, owner_approval_threshold, engine_attestation_key }) {
     assert(owner_id.length > 0, "Owner ID cannot be empty");
     assert(agent_id.length > 0, "Agent ID cannot be empty");
 
@@ -66,6 +145,7 @@ export class PolicyVault {
     this.pending_count = 0;
     this.pending_timelock_update = "";
     this.proposal_nonce = 0;
+    this.engine_attestation_key = engine_attestation_key || "";
   }
 
   // --- Internal Guardrail Helper ---
@@ -75,6 +155,55 @@ export class PolicyVault {
       this.spent_today = BigInt(0);
       this.last_reset_day = currentDay;
     }
+  }
+
+  // --- Engine Attestation Verifier (Fail-Closed) ---
+  _verifyAttestation(attestationStr, caller, recipient, amt) {
+    assert(typeof attestationStr === 'string' && attestationStr.length > 0, "SECURITY_ALERT: Attestation required by policy vault");
+    let att = null;
+    try {
+      att = JSON.parse(attestationStr);
+    } catch (e) {
+      att = null;
+    }
+    assert(att && typeof att === 'object', "INVALID_ENGINE_ATTESTATION: Malformed JSON");
+    assert(typeof att.engine_id === 'string' && att.engine_id.length > 0, "INVALID_ENGINE_ATTESTATION: Missing engine_id");
+    assert(att.agent_id === caller, "INVALID_ENGINE_ATTESTATION: Caller agent mismatch");
+    assert(att.recipient === recipient, "INVALID_ENGINE_ATTESTATION: Recipient mismatch");
+    assert(att.amount_yocto === amt.toString(), "INVALID_ENGINE_ATTESTATION: Amount mismatch");
+    assert(typeof att.nonce === 'string' && att.nonce.length > 0, "INVALID_ENGINE_ATTESTATION: Missing nonce");
+    assert(typeof att.expires_at === 'string' && att.expires_at.length > 0, "INVALID_ENGINE_ATTESTATION: Missing expires_at");
+    assert(typeof att.sig_hash === 'string' && att.sig_hash.length === 64, "INVALID_ENGINE_ATTESTATION: Invalid sig_hash format");
+
+    // Expiry check
+    const currentTs = near.blockTimestamp();
+    const expiresAt = BigInt(att.expires_at);
+    assert(expiresAt > currentTs, "INVALID_ENGINE_ATTESTATION: Attestation ticket expired");
+
+    // Nonce replay check on-chain (using storage-level LookupMap)
+    const nonceKey = `nonce:${att.nonce}`;
+    assert(!attestationNonces.containsKey(nonceKey), "INVALID_ENGINE_ATTESTATION: Attestation nonce already consumed");
+
+    // Cryptographic HMAC check
+    const canonical = `${att.engine_id}|${att.agent_id}|${att.recipient}|${att.amount_yocto}|${att.nonce}|${att.expires_at}`;
+    const expectedSig = hmacSha256Hex(this.engine_attestation_key, canonical);
+    assert(constantTimeEqualHex(expectedSig, att.sig_hash), "INVALID_ENGINE_ATTESTATION: Cryptographic signature mismatch");
+
+    attestationNonces.set(nonceKey, "1");
+  }
+
+  @call({})
+  set_engine_attestation_key({ engine_attestation_key }) {
+    assert(!this.is_paused, "SECURITY_ALERT: Vault is paused by emergency circuit breaker");
+    const caller = near.predecessorAccountId();
+    assert(caller === this.owner_id, "Only owner can set engine attestation key");
+    this.engine_attestation_key = engine_attestation_key || "";
+    return { engine_attestation_key: this.engine_attestation_key };
+  }
+
+  @view({})
+  get_engine_attestation_key() {
+    return this.engine_attestation_key || "";
   }
 
   // --- Emergency Circuit Breaker (P1 Feature) ---
@@ -238,7 +367,7 @@ export class PolicyVault {
 
   // --- Agent Propose Function ---
   @call({})
-  propose_payment({ recipient, amount, memo }) {
+  propose_payment({ recipient, amount, memo, attestation }) {
     assert(!this.is_paused, "SECURITY_ALERT: Vault is paused by emergency circuit breaker");
 
     const caller = near.predecessorAccountId();
@@ -251,6 +380,11 @@ export class PolicyVault {
     assert(!memo || memo.length <= 256, "SECURITY_ALERT: Memo exceeds 256 character limit");
     const amt = BigInt(amount);
     assert(amt > BigInt(0), "Amount must be strictly positive");
+
+    // Guardrail: Cryptographic Engine Attestation Verification (Fail-Closed)
+    if (this.engine_attestation_key && this.engine_attestation_key.length > 0) {
+      this._verifyAttestation(attestation, caller, recipient, amt);
+    }
 
     // Guardrail 0: Anti-Dust Spam and Max Pending Ceiling
     assert(amt >= MIN_TRANSFER_FLOOR, `SECURITY_ALERT: Amount below minimum floor (0.001 NEAR)`);
@@ -285,7 +419,7 @@ export class PolicyVault {
       state: initialState,
       createdAt: near.blockTimestamp().toString(),
       submittedDay: this.last_reset_day.toString(),
-      attestation: ""
+      attestation: attestation || ""
     });
 
     this.proposals.set(proposalId, proposal);

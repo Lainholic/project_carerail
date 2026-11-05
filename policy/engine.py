@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, getcontext
 from enum import Enum
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -102,14 +103,98 @@ class PaymentProposal:
     rejection_reason: Optional[str] = None
     tx_hash: Optional[str] = None
     submitted_day: str = field(default_factory=lambda: time.strftime("%Y-%m-%d", time.gmtime()))
+    attestation: Optional[str] = None
 
     def compute_hash(self) -> str:
         payload = f"{self.proposal_id}:{self.agent_id}:{self.recipient}:{self.amount_near}:{self.nonce}:{self.intent_memo}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+@dataclass
+class AttestationTicket:
+    engine_id: str
+    proposal_id: str
+    agent_id: str
+    recipient: str
+    amount_yocto: str
+    nonce: str
+    expires_at: str
+    sig_hash: str
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "engine_id": self.engine_id,
+                "proposal_id": self.proposal_id,
+                "agent_id": self.agent_id,
+                "recipient": self.recipient,
+                "amount_yocto": self.amount_yocto,
+                "nonce": self.nonce,
+                "expires_at": self.expires_at,
+                "sig_hash": self.sig_hash,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+
+class AttestationEngine:
+    def __init__(self, engine_id: str, shared_secret: str, ttl_seconds: int = 120):
+        self.engine_id = engine_id
+        self.shared_secret = shared_secret.encode("utf-8")
+        self.ttl_seconds = ttl_seconds
+
+    def _canonical(self, agent_id: str, recipient: str, amount_yocto: str, nonce: str, expires_at: str) -> bytes:
+        return f"{self.engine_id}|{agent_id}|{recipient}|{amount_yocto}|{nonce}|{expires_at}".encode("utf-8")
+
+    def create_attestation(
+        self,
+        proposal_id: str,
+        agent_id: str,
+        recipient: str,
+        amount_near: Union[float, Decimal, str],
+        nonce: Union[str, int],
+        ttl_seconds: Optional[int] = None,
+    ) -> AttestationTicket:
+        ttl = ttl_seconds if ttl_seconds is not None else self.ttl_seconds
+        expires_at_ns = str(time.time_ns() + ttl * 1_000_000_000)
+        dec_amt = _to_decimal(amount_near)
+        yocto = str(int(dec_amt * Decimal("1000000000000000000000000")))
+        nonce_str = str(nonce)
+
+        canonical = self._canonical(agent_id, recipient, yocto, nonce_str, expires_at_ns)
+        sig_hash = hmac.new(self.shared_secret, canonical, hashlib.sha256).hexdigest()
+
+        return AttestationTicket(
+            engine_id=self.engine_id,
+            proposal_id=proposal_id,
+            agent_id=agent_id,
+            recipient=recipient,
+            amount_yocto=yocto,
+            nonce=nonce_str,
+            expires_at=expires_at_ns,
+            sig_hash=sig_hash,
+        )
+
+    def verify_ticket(self, ticket: AttestationTicket) -> bool:
+        now_ns = time.time_ns()
+        if int(ticket.expires_at) <= now_ns:
+            return False
+        canonical = self._canonical(
+            ticket.agent_id, ticket.recipient, ticket.amount_yocto, ticket.nonce, ticket.expires_at
+        )
+        expected = hmac.new(self.shared_secret, canonical, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, ticket.sig_hash)
+
+
 class CareRailEngine:
-    def __init__(self, rules: PolicyRules, db_path: str = ":memory:"):
+    def __init__(
+        self,
+        rules: PolicyRules,
+        db_path: str = ":memory:",
+        attestation_secret: Optional[str] = None,
+        engine_id: str = "carerail-engine-v1"
+    ):
         self.rules = rules
         self.storage = PersistentLedgerStorage(db_path)
         self.proposals: Dict[str, PaymentProposal] = {}
@@ -117,6 +202,7 @@ class CareRailEngine:
         self.daily_spend_ledger: Dict[str, Decimal] = {}      # Date string -> settled total Decimal
         self.daily_reserved_ledger: Dict[str, Decimal] = {}   # Date string -> pending reserved Decimal
         self.is_paused: bool = self.storage.get_pause_state()
+        self.attestation_engine = AttestationEngine(engine_id, attestation_secret) if attestation_secret else None
 
         # 1. Restore all daily ledgers from storage
         all_ledgers = self.storage.get_all_daily_ledgers()
@@ -312,8 +398,27 @@ class CareRailEngine:
         self.seen_nonces.add(proposal.nonce)
         self.daily_reserved_ledger[today_key] = new_reserved
         proposal.state = ProposalState[outcome]
+        if self.attestation_engine:
+            proposal.attestation = self.attestation_engine.create_attestation(
+                proposal.proposal_id,
+                proposal.agent_id,
+                proposal.recipient,
+                proposal.amount_near,
+                str(proposal.nonce),
+            ).to_json()
         self.proposals[proposal.proposal_id] = proposal
         return proposal.state, None
+
+    def generate_attestation_ticket(self, proposal: PaymentProposal) -> Optional[str]:
+        if not self.attestation_engine:
+            return None
+        return self.attestation_engine.create_attestation(
+            proposal.proposal_id,
+            proposal.agent_id,
+            proposal.recipient,
+            proposal.amount_near,
+            str(proposal.nonce),
+        ).to_json()
 
     def owner_approve(self, proposal_id: str, owner_public_key: str, signature_b58: str) -> Tuple[bool, str]:
         """Owner manually approves a held transaction.

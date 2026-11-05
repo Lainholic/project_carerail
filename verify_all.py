@@ -83,6 +83,12 @@ def main():
         ["node", "near_rail/test_human_approval.js"]
     ))
 
+    # 9. Adversarial Stress & Cryptographic Boundary
+    results.append(run_step(
+        "9. Adversarial Stress & Cryptographic Boundary (DeepSeek & Annie)",
+        [sys.executable, "-m", "unittest", "test_adversarial_stress.py"]
+    ))
+
     print("=" * 70)
     passed = sum(1 for r in results if r)
     total = len(results)
