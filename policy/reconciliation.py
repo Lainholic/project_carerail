@@ -90,25 +90,39 @@ class NearReconciliationVerifier:
         if actual_receiver and actual_receiver != contract_id:
             return False, f"TARGET_CONTRACT_MISMATCH: Expected {contract_id}, but on-chain receiver was {actual_receiver}"
 
-        # 2. Verify payload arguments (recipient and amount matching)
+        # 2. Check receipts outcome for cross-contract execution failures
+        receipts_outcome = res.get("receipts_outcome", [])
+        for ro in receipts_outcome:
+            status = ro.get("outcome", {}).get("status", {})
+            if "Failure" in status:
+                return False, f"RECEIPT_EXECUTION_FAILURE: {status['Failure']}"
+
+        # 3. Verify payload arguments (strict Fail-Closed matching of propose_payment)
         actions_list = tx_info.get("actions", [])
+        verified_call = False
         for act in actions_list:
             if isinstance(act, dict) and "FunctionCall" in act:
                 fc = act["FunctionCall"]
+                if fc.get("method_name") != "propose_payment":
+                    continue
                 args_b64 = fc.get("args")
-                if args_b64:
-                    try:
-                        args_json = json.loads(base64.b64decode(args_b64).decode("utf-8"))
-                        # Verify recipient
-                        if "recipient" in args_json and args_json["recipient"] != expected_recipient:
-                            return False, f"PAYMENT_RECIPIENT_MISMATCH: Expected {expected_recipient}, but tx has {args_json['recipient']}"
-                        # Verify amount (in yoctoNEAR)
-                        if "amount" in args_json:
-                            act_yocto = Decimal(str(args_json["amount"]))
-                            exp_yocto = expected_amount_near * YOCTO_PER_NEAR
-                            if act_yocto != exp_yocto:
-                                return False, f"PAYMENT_AMOUNT_MISMATCH: Expected {exp_yocto} yoctoNEAR, but tx has {act_yocto} yoctoNEAR"
-                    except Exception as parse_err:
-                        return False, f"ARGS_DECODING_ERROR: {str(parse_err)}"
+                if not args_b64:
+                    return False, "MISSING_FUNCTION_ARGS"
+                try:
+                    args_json = json.loads(base64.b64decode(args_b64).decode("utf-8"))
+                    if "recipient" not in args_json or "amount" not in args_json:
+                        return False, "INCOMPLETE_PAYMENT_ARGS: recipient and amount are mandatory"
+                    if args_json["recipient"] != expected_recipient:
+                        return False, f"PAYMENT_RECIPIENT_MISMATCH: Expected {expected_recipient}, but tx has {args_json['recipient']}"
+                    act_yocto = Decimal(str(args_json["amount"]))
+                    exp_yocto = (Decimal(str(expected_amount_near)) * YOCTO_PER_NEAR).quantize(Decimal("1"))
+                    if act_yocto != exp_yocto:
+                        return False, f"PAYMENT_AMOUNT_MISMATCH: Expected {exp_yocto} yoctoNEAR, but tx has {act_yocto} yoctoNEAR"
+                    verified_call = True
+                except Exception as parse_err:
+                    return False, f"ARGS_DECODING_ERROR: {str(parse_err)}"
+
+        if not verified_call:
+            return False, "NO_MATCHING_PROPOSE_PAYMENT_ACTION_FOUND"
 
         return True, "ONCHAIN_RECONCILIATION_VERIFIED"

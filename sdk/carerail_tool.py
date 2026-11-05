@@ -10,7 +10,7 @@ import json
 import time
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
-from policy.engine import CareRailEngine, PaymentProposal, PolicyRules, ProposalState
+from policy.engine import CareRailEngine, PaymentProposal, PolicyRules, ProposalState, _to_decimal
 
 
 class CareRailPaymentTool:
@@ -28,7 +28,7 @@ class CareRailPaymentTool:
         self,
         engine: CareRailEngine,
         agent_id: str = "autonomous-agent-01",
-        onchain_dispatcher: Optional[Callable[[str, float, str], Tuple[bool, str]]] = None,
+        onchain_dispatcher: Optional[Callable[[str, Union[Decimal, float], str], Tuple[bool, str]]] = None,
         simulation_mode: bool = False
     ):
         self.engine = engine
@@ -36,9 +36,6 @@ class CareRailPaymentTool:
         self.onchain_dispatcher = onchain_dispatcher
         self.simulation_mode = simulation_mode
         self._nonce_counter = int(time.time() * 1000)
-
-    def _next_nonce() -> int:
-        pass
 
     def _get_next_nonce(self) -> int:
         self._nonce_counter += 1
@@ -72,18 +69,19 @@ class CareRailPaymentTool:
             }
         }
 
-    def execute(self, recipient: str, amount_near: Union[float, str], intent_memo: str) -> Dict[str, Any]:
+    def execute(self, recipient: str, amount_near: Union[Decimal, float, str, int], intent_memo: str) -> Dict[str, Any]:
         """Evaluates and executes an agent payment request through the CareRail Firewall.
         Strict invariant: Never claims SETTLED or PAYMENT_CONFIRMED without a verified on-chain execution receipt.
         """
         nonce = self._get_next_nonce()
         proposal_id = f"tool-prop-{nonce}"
 
+        amount_dec = _to_decimal(amount_near) if isinstance(amount_near, (int, float, str, Decimal)) else Decimal("0")
         proposal = PaymentProposal(
             proposal_id=proposal_id,
             agent_id=self.agent_id,
             recipient=recipient,
-            amount_near=float(amount_near) if isinstance(amount_near, (int, float, str)) else 0.0,
+            amount_near=amount_dec,
             intent_memo=intent_memo,
             nonce=nonce,
         )

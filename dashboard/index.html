@@ -424,8 +424,8 @@
 
     <div class="card">
       <span class="card-title">Fail-Closed Limits</span>
-      <span class="card-value">0.50 / 0.10 NEAR</span>
-      <span class="card-meta">Max Per Tx: 0.50 NEAR | Human Approval > 0.10 NEAR</span>
+      <span class="card-value" id="valLimits">0.50 / 0.10 NEAR</span>
+      <span class="card-meta" id="metaLimits">Max Per Tx: 0.50 NEAR | Human Approval > 0.10 NEAR</span>
     </div>
 
     <div class="card">
@@ -643,9 +643,32 @@
         document.getElementById('valPendingCount').innerText = `${pending} AWAITING`;
         document.getElementById('valPendingCount').style.color = pending > 0 ? 'var(--accent-amber)' : 'var(--text-muted)';
 
+        // Update Fail-Closed Limits card from on-chain policy
+        if (state.max_per_transfer && state.owner_approval_threshold) {
+          const maxTxNear = (Number(BigInt(state.max_per_transfer) / 1000000000000000000000n) / 1000).toFixed(2);
+          const ownerThreshNear = (Number(BigInt(state.owner_approval_threshold) / 1000000000000000000000n) / 1000).toFixed(2);
+          const valLimitsEl = document.getElementById('valLimits');
+          const metaLimitsEl = document.getElementById('metaLimits');
+          if (valLimitsEl) valLimitsEl.innerText = `${maxTxNear} / ${ownerThreshNear} NEAR`;
+          if (metaLimitsEl) metaLimitsEl.innerText = `Max Per Tx: ${maxTxNear} NEAR | Human Approval > ${ownerThreshNear} NEAR`;
+        }
+
+        const pauseStatusEl = document.getElementById('pauseStatus');
+        const btnFreeze = document.getElementById('btnKillswitch');
         if (state.is_paused) {
-          document.getElementById('pauseStatus').innerText = 'PAUSED ON-CHAIN';
-          document.getElementById('pauseStatus').style.color = 'var(--accent-red)';
+          isPaused = true;
+          if (pauseStatusEl) {
+            pauseStatusEl.innerText = 'PAUSED ON-CHAIN';
+            pauseStatusEl.style.color = 'var(--accent-red)';
+          }
+          if (btnFreeze) btnFreeze.style.borderColor = 'var(--accent-red)';
+        } else {
+          isPaused = false;
+          if (pauseStatusEl) {
+            pauseStatusEl.innerText = 'ARMED (NORMAL)';
+            pauseStatusEl.style.color = 'var(--accent-green)';
+          }
+          if (btnFreeze) btnFreeze.style.borderColor = 'var(--card-border)';
         }
 
         log(`[LIVE RPC] Synced: Spent ${spentNear.toFixed(3)} NEAR / Limit ${limitNear.toFixed(2)} NEAR, Pending: ${pending}`);
