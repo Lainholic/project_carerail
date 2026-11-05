@@ -1,8 +1,9 @@
 """CareRail On-Chain Reconciliation & Settlement Verifier
-Verifies on-chain finality and state matching before or during commit_spend.
-Prevents unconfirmed or rolled-back transactions from permanently altering off-chain budget state (P1-7).
+Verifies on-chain finality, recipient binding, and exact amount matching before or during commit_spend.
+Prevents unconfirmed, rolled-back, or spoofed transactions from altering off-chain budget state (Terra Round 5 Fixed).
 """
 
+import base64
 from decimal import Decimal
 import json
 import os
@@ -11,6 +12,8 @@ from typing import Dict, Optional, Tuple
 import urllib.request
 import urllib.error
 
+YOCTO_PER_NEAR = Decimal("1000000000000000000000000")
+
 
 class NearReconciliationVerifier:
     def __init__(self, rpc_url: str = "https://rpc.testnet.fastnear.com", timeout_seconds: int = 5):
@@ -18,9 +21,7 @@ class NearReconciliationVerifier:
         self.timeout = timeout_seconds
 
     def query_tx_status(self, tx_hash: str, sender_id: str) -> Tuple[bool, Optional[dict], str]:
-        """Queries NEAR RPC EXPERIMENTAL_tx_status or tx for transaction outcome.
-        Returns: (is_success, raw_result_dict, error_or_status_message)
-        """
+        """Queries NEAR RPC for transaction outcome."""
         payload = {
             "jsonrpc": "2.0",
             "id": f"rec-{int(time.time()*1000)}",
@@ -47,7 +48,6 @@ class NearReconciliationVerifier:
             result = res.get("result", {})
             status = result.get("status", {})
 
-            # Check if transaction succeeded on-chain
             if "SuccessValue" in status:
                 return True, result, "SUCCESS_VALUE"
             elif "SuccessReceiptId" in status:
@@ -75,19 +75,40 @@ class NearReconciliationVerifier:
         Validates:
         1. On-chain finality status is Success
         2. Receiver of transaction was CareRail PolicyVault contract
+        3. Transaction args exactly match expected recipient and expected amount (Terra P1 Fixed)
         """
-        # In mock or test mode, synthetic hashes can bypass RPC call
-        if allow_mock and (tx_hash.startswith("mock-") or tx_hash.startswith("tx-")):
+        if allow_mock and (tx_hash.startswith("mock-") or tx_hash.startswith("sim-")):
             return True, "MOCK_VERIFIED_SUCCESS"
 
         success, res, msg = self.query_tx_status(tx_hash, sender_id)
         if not success:
             return False, f"RECONCILIATION_FAILED: {msg}"
 
-        # Verify transaction receiver was indeed the CareRail contract
+        # 1. Verify transaction receiver was the PolicyVault contract
         tx_info = res.get("transaction", {})
         actual_receiver = tx_info.get("receiver_id")
         if actual_receiver and actual_receiver != contract_id:
             return False, f"TARGET_CONTRACT_MISMATCH: Expected {contract_id}, but on-chain receiver was {actual_receiver}"
+
+        # 2. Verify payload arguments (recipient and amount matching)
+        actions_list = tx_info.get("actions", [])
+        for act in actions_list:
+            if isinstance(act, dict) and "FunctionCall" in act:
+                fc = act["FunctionCall"]
+                args_b64 = fc.get("args")
+                if args_b64:
+                    try:
+                        args_json = json.loads(base64.b64decode(args_b64).decode("utf-8"))
+                        # Verify recipient
+                        if "recipient" in args_json and args_json["recipient"] != expected_recipient:
+                            return False, f"PAYMENT_RECIPIENT_MISMATCH: Expected {expected_recipient}, but tx has {args_json['recipient']}"
+                        # Verify amount (in yoctoNEAR)
+                        if "amount" in args_json:
+                            act_yocto = Decimal(str(args_json["amount"]))
+                            exp_yocto = expected_amount_near * YOCTO_PER_NEAR
+                            if act_yocto != exp_yocto:
+                                return False, f"PAYMENT_AMOUNT_MISMATCH: Expected {exp_yocto} yoctoNEAR, but tx has {act_yocto} yoctoNEAR"
+                    except Exception as parse_err:
+                        return False, f"ARGS_DECODING_ERROR: {str(parse_err)}"
 
         return True, "ONCHAIN_RECONCILIATION_VERIFIED"

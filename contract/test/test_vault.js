@@ -234,14 +234,15 @@ class PolicyVaultTestable {
     if (reqPerTransfer > ABSOLUTE_MAX_PER_TRANSFER) throw new Error(`LIMIT_VIOLATION: Exceeds protocol absolute per-transfer cap (${ABSOLUTE_MAX_PER_TRANSFER})`);
     if (reqPerTransfer > reqDailyTotal) throw new Error("INVALID_LIMITS: Per-transfer limit cannot exceed daily total");
 
-    const isIncrease = reqPerTransfer > curPerTransfer || reqDailyTotal > curDailyTotal;
+    const reqThreshold = new_owner_threshold !== undefined ? BigInt(new_owner_threshold) : this.owner_approval_threshold;
+    const isIncrease = reqPerTransfer > curPerTransfer || reqDailyTotal > curDailyTotal || reqThreshold > this.owner_approval_threshold;
 
     if (isIncrease) {
       const unlock_timestamp = (global.near.blockTimestamp() + TIMELOCK_DURATION_NS).toString();
       this.pending_timelock_update = {
         new_max_per_transfer: reqPerTransfer.toString(),
         new_max_daily_total: reqDailyTotal.toString(),
-        new_owner_threshold: new_owner_threshold !== undefined ? BigInt(new_owner_threshold).toString() : this.owner_approval_threshold.toString(),
+        new_owner_threshold: reqThreshold.toString(),
         unlock_timestamp: unlock_timestamp
       };
       return { status: "QueuedInTimelock", unlock_timestamp };
@@ -574,7 +575,18 @@ async function runTests() {
   assert.strictEqual(vault.pending_timelock_update, null);
   console.log("[PASS] Test 17: Defensive Instant Limit Reduction & Cancellation Verified (Annie Verified)");
 
-  console.log("\n>>> ALL 17 CONTRACT INVARIANT TESTS PASSED (100%) <<<");
+  // 18. [Terra Round 5 Fix] Approval Threshold Elevation Must Require 24h Timelock
+  // Only raising owner_approval_threshold (from 2 NEAR to 4 NEAR) without changing per-tx or daily caps
+  const threshRes = vault.request_limit_update({
+    new_max_per_transfer: vault.max_per_transfer.toString(),
+    new_max_daily_total: vault.max_daily_total.toString(),
+    new_owner_threshold: "4000000000000000000000000" // 4 NEAR (Increase!)
+  });
+  assert.strictEqual(threshRes.status, "QueuedInTimelock", "Elevating owner approval threshold MUST require 24h timelock");
+  assert.ok(vault.pending_timelock_update !== null);
+  console.log("[PASS] Test 18: Owner Threshold Elevation Protected by 24h Timelock (Terra Round 5 Fixed)");
+
+  console.log("\n>>> ALL 18 CONTRACT INVARIANT TESTS PASSED (100%) <<<");
 }
 
 runTests().catch(err => {

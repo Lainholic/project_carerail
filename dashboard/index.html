@@ -616,7 +616,7 @@
         request_type: "call_function",
         finality: "final",
         account_id: CONTRACT_ID,
-        method_name: "get_vault_state",
+        method_name: "get_policy",
         args_base64: btoa("{}")
       });
 
@@ -626,7 +626,7 @@
         const state = JSON.parse(str);
 
         const spentYocto = BigInt(state.spent_today || "0");
-        const limitYocto = BigInt(state.daily_limit || "2000000000000000000000000");
+        const limitYocto = BigInt(state.max_daily_total || state.daily_limit || "2000000000000000000000000");
         const spentNear = (Number(spentYocto / 1000000000000000000000n) / 1000);
         const limitNear = (Number(limitYocto / 1000000000000000000000n) / 1000);
         const pct = Math.min(100, Math.max(0, (spentNear / (limitNear || 2.0)) * 100)).toFixed(1);

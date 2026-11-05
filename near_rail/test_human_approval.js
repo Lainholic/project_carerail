@@ -47,14 +47,7 @@ async function runHumanInTheLoopTest() {
   const agentSigner = new KeyPairSigner(KeyPair.fromString(agentPrivKey));
   const agentAccount = new Account(accountId, provider, agentSigner);
 
-  // 0. Reset daily spent for fresh automated test headroom
   const gasLimit = BigInt("30000000000000");
-  try {
-    await ownerAccount.signAndSendTransaction({
-      receiverId: accountId,
-      actions: [actions.functionCall('owner_reset_daily_spent', {}, gasLimit, BigInt(0))]
-    });
-  } catch (e) {}
 
   // 1. Agent proposes high-value payment (0.12 NEAR > 0.1 NEAR threshold)
   console.log("[Step 1] Agent proposes 0.12 NEAR to whitelisted 'hotel.testnet' (> 0.1 NEAR threshold)...");
@@ -94,21 +87,33 @@ async function runHumanInTheLoopTest() {
   console.log(`  [PASS] Stored proposal ${heldProposal.id} is held in state: ${heldProposal.state}`);
   console.log(`  Details: ${heldProposal.amount} yoctoNEAR to ${heldProposal.recipient}`);
 
-  // 3. Owner manually executes owner_approve
-  console.log(`\n[Step 2] Owner submits cryptographic approval for ${heldProposal.id}...`);
+  // 3. Owner manually executes owner_approve with cryptographic attestation
+  console.log(`\n[Step 2] Owner submits cryptographic approval & attestation for ${heldProposal.id}...`);
+  const ownerKeyPair = KeyPair.fromString(ownerPrivKey);
+  const ownerPubKey = ownerKeyPair.getPublicKey().toString();
+  const challengeMsg = Buffer.from(`carerail:approval:${heldProposal.id}:${heldProposal.amount}:${heldProposal.recipient}`);
+  const signedSig = ownerKeyPair.sign(challengeMsg);
+  const sigB58 = Buffer.from(signedSig.signature).toString('base64');
+
   const approveResult = await ownerAccount.signAndSendTransaction({
     receiverId: accountId,
-    actions: [actions.functionCall('owner_approve', { proposal_id: heldProposal.id }, gasLimit, BigInt(0))]
+    actions: [actions.functionCall('owner_approve', {
+      proposal_id: heldProposal.id,
+      owner_public_key: ownerPubKey,
+      signature_b58: sigB58
+    }, gasLimit, BigInt(0))]
   });
 
   const approveTxHash = approveResult.transaction ? approveResult.transaction.hash : (approveResult.transaction_outcome ? approveResult.transaction_outcome.id : "CONFIRMED");
   console.log(`  Approved on-chain! Tx: ${approveTxHash}`);
   console.log(`  Explorer: https://testnet.nearblocks.io/txns/${approveTxHash}`);
 
-  // 4. Verify post-approval state
+  // 4. Verify post-approval state and on-chain attestation
   const updatedProposal = await viewCall(provider, accountId, 'get_proposal', { proposal_id: heldProposal.id });
   assert.ok(updatedProposal.state === "SUBMITTED" || updatedProposal.state === "SETTLED", `Unexpected post-approval state: ${updatedProposal.state}`);
+  assert.ok(updatedProposal.attestation, "Cryptographic attestation must be permanently recorded on-chain");
   console.log(`  [PASS] Verified post-approval state: ${updatedProposal.state}`);
+  console.log(`  [PASS] Verified on-chain attestation: ${updatedProposal.attestation}`);
 
   console.log("\n===============================================================================");
   console.log(" Human-in-the-Loop On-Chain Verification: PASS (Strict Invariants Enforced)");

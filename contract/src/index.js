@@ -86,15 +86,6 @@ export class PolicyVault {
     return { is_paused: this.is_paused };
   }
 
-  // --- Owner Maintenance: Reset Daily Spent (Owner Only) ---
-  @call({})
-  owner_reset_daily_spent() {
-    const caller = near.predecessorAccountId();
-    assert(caller === this.owner_id, "Only owner can reset daily spent");
-    this.spent_today = BigInt(0);
-    return { spent_today: this.spent_today.toString() };
-  }
-
   // ==========================================
   // [보안 기능 1] 온체인 암호학적 서명 박제 (Attestation)
   // ==========================================
@@ -176,15 +167,16 @@ export class PolicyVault {
     assert(reqPerTransfer <= ABSOLUTE_MAX_PER_TRANSFER, `LIMIT_VIOLATION: Exceeds protocol absolute per-transfer cap (${ABSOLUTE_MAX_PER_TRANSFER})`);
     assert(reqPerTransfer <= reqDailyTotal, "INVALID_LIMITS: Per-transfer limit cannot exceed daily total");
 
-    // 2. Identify if this is a limit increase (requires 24h timelock) or decrease (instant emergency protection)
-    const isIncrease = reqPerTransfer > curPerTransfer || reqDailyTotal > curDailyTotal;
+    // 2. Identify if this is a limit increase or threshold elevation (requires 24h timelock)
+    const reqThreshold = new_owner_threshold !== undefined ? BigInt(new_owner_threshold) : this.owner_approval_threshold;
+    const isIncrease = reqPerTransfer > curPerTransfer || reqDailyTotal > curDailyTotal || reqThreshold > this.owner_approval_threshold;
 
     if (isIncrease) {
       const unlock_timestamp = (near.blockTimestamp() + TIMELOCK_DURATION_NS).toString();
       this.pending_timelock_update = JSON.stringify({
         new_max_per_transfer: reqPerTransfer.toString(),
         new_max_daily_total: reqDailyTotal.toString(),
-        new_owner_threshold: new_owner_threshold !== undefined ? BigInt(new_owner_threshold).toString() : this.owner_approval_threshold.toString(),
+        new_owner_threshold: reqThreshold.toString(),
         unlock_timestamp: unlock_timestamp
       });
 
