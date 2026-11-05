@@ -1,0 +1,19 @@
+{
+  "submittedAt": "2026-11-05T21:22:31+09:00",
+  "status": "201 Created",
+  "requestId": "3824ad53-8f26-426f-8239-99f5080ec3ca",
+  "projectName": "CareRail",
+  "leadName": "Synapse Creative",
+  "email": "contact@synapse-creative.com",
+  "size": "1",
+  "tracks": [
+    "security",
+    "agents",
+    "business"
+  ],
+  "nearAddress": "synapsecreate.near",
+  "projectUrl": "https://github.com/Lainholic/project_carerail",
+  "demoUrl": "https://x.com/LainHolic/status/2118314930608930992",
+  "idea": "Giving autonomous AI agents direct signing keys creates an immediate security hazard if prompt injection occurs. CareRail is a deterministic payment firewall for AI agents on NEAR that air-gaps untrusted LLM runtimes from private keys. Agents only hold restricted FunctionCallAccessKeys allowing payment proposals with zero transfer authority. Proposals are evaluated by a fail-closed deterministic policy engine. Any transaction exceeding the autonomous threshold (0.10 NEAR) locks on-chain in PolicyVault (carerail-274071e4.testnet), strictly requiring owner Ed25519 authorization via NEP-413. Fully verified on NEAR testnet with 12 automated invariant suites (100% passing) and an interactive security dashboard.",
+  "consent": true
+}
