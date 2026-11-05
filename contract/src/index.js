@@ -69,6 +69,15 @@ export class PolicyVault {
     return { is_paused: this.is_paused };
   }
 
+  // --- Owner Maintenance: Reset Daily Spent (Owner Only) ---
+  @call({})
+  owner_reset_daily_spent() {
+    const caller = near.predecessorAccountId();
+    assert(caller === this.owner_id, "Only owner can reset daily spent");
+    this.spent_today = BigInt(0);
+    return { spent_today: this.spent_today.toString() };
+  }
+
   // --- Agent Propose Function ---
   @call({})
   propose_payment({ recipient, amount, memo }) {

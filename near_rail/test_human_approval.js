@@ -47,10 +47,18 @@ async function runHumanInTheLoopTest() {
   const agentSigner = new KeyPairSigner(KeyPair.fromString(agentPrivKey));
   const agentAccount = new Account(accountId, provider, agentSigner);
 
-  // 1. Agent proposes high-value payment (0.2 NEAR > 0.1 NEAR threshold)
-  console.log("[Step 1] Agent proposes 0.2 NEAR to whitelisted 'hotel.testnet' (> 0.1 NEAR threshold)...");
+  // 0. Reset daily spent for fresh automated test headroom
   const gasLimit = BigInt("30000000000000");
-  const yocto = parseNearAmount("0.2");
+  try {
+    await ownerAccount.signAndSendTransaction({
+      receiverId: accountId,
+      actions: [actions.functionCall('owner_reset_daily_spent', {}, gasLimit, BigInt(0))]
+    });
+  } catch (e) {}
+
+  // 1. Agent proposes high-value payment (0.12 NEAR > 0.1 NEAR threshold)
+  console.log("[Step 1] Agent proposes 0.12 NEAR to whitelisted 'hotel.testnet' (> 0.1 NEAR threshold)...");
+  const yocto = parseNearAmount("0.12");
   
   const proposeResult = await agentAccount.signAndSendTransaction({
     receiverId: accountId,
@@ -74,8 +82,13 @@ async function runHumanInTheLoopTest() {
     throw new Error(`Proposal execution failed on-chain: ${JSON.stringify(proposeResult.status.Failure)}`);
   }
 
-  // 2. Query proposal state directly from contract storage
-  const heldProposal = await viewCall(provider, accountId, 'get_proposal', { proposal_id: proposalId });
+  // 2. Query proposal state directly from contract storage (with retry for block indexing)
+  let heldProposal = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    heldProposal = await viewCall(provider, accountId, 'get_proposal', { proposal_id: proposalId });
+    if (heldProposal) break;
+    await new Promise(r => setTimeout(r, 1000));
+  }
   assert.ok(heldProposal, `Proposal ${proposalId} not found in contract storage`);
   assert.strictEqual(heldProposal.state, "AWAITING_OWNER_APPROVAL", "Stored proposal state must be AWAITING_OWNER_APPROVAL");
   console.log(`  [PASS] Stored proposal ${heldProposal.id} is held in state: ${heldProposal.state}`);
