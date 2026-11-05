@@ -1,0 +1,23 @@
+{
+  "version": "1.0.0",
+  "policy_id": "policy_care_standard_v1",
+  "allowed_recipients": [
+    "care-provider.testnet",
+    "physio-clinic.testnet",
+    "compute-vendor.testnet",
+    "api-relay.testnet"
+  ],
+  "max_per_transfer_near": 5.0,
+  "max_daily_total_near": 20.0,
+  "owner_approval_threshold_near": 2.0,
+  "request_expiry_seconds": 300,
+  "reject_unknown_actions": true,
+  "blocked_memo_keywords": [
+    "urgent transfer",
+    "bypass",
+    "system update",
+    "emergency drainage",
+    "0xattacker",
+    "override"
+  ]
+}
