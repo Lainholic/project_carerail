@@ -57,6 +57,18 @@ class CareRailServerHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ["/dashboard", "/dashboard/", "/dashboard/index.html"]:
+            dash_path = os.path.join(ROOT_DIR, "dashboard", "index.html")
+            if os.path.exists(dash_path):
+                with open(dash_path, "rb") as f:
+                    content = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+                return
+
         if parsed.path == "/api/status":
             rules_data = {
                 "allowed_recipients": engine.rules.allowed_recipients,
@@ -112,6 +124,8 @@ class CareRailServerHandler(SimpleHTTPRequestHandler):
                 "intent_memo": prop.intent_memo,
                 "state": state.value,
                 "rejection_reason": reason,
+                "proposal_hash": prop.compute_hash(),
+                "created_at": getattr(prop, 'created_at', None),
             }
 
             if state == ProposalState.APPROVED:
@@ -159,6 +173,8 @@ class CareRailServerHandler(SimpleHTTPRequestHandler):
                 "intent_memo": prop.intent_memo,
                 "state": state.value,
                 "rejection_reason": reason,
+                "proposal_hash": prop.compute_hash(),
+                "created_at": getattr(prop, 'created_at', None),
             }
 
             # If instantly approved, execute settlement
