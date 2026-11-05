@@ -99,7 +99,7 @@ python verify_all.py
 ```
 
 ### Automated Verification Suite Results (10/10 PASS - 100% Invariants Verified):
-1. **PolicyVault Smart Contract Invariants (Node.js)**: 22 invariant tests covering callback isolation, day-boundary rollback, emergency killswitch, anti-dust floor, bounded memo, governance 24h timelock, and engine attestation verification.
+1. **PolicyVault Smart Contract Invariants (Node.js)**: 23 invariant tests covering callback isolation, day-boundary rollback, emergency killswitch, anti-dust floor, bounded memo, governance 24h timelock, cryptographic engine attestation, and malformed float/string injection defense.
 2. **Deterministic FSM Policy Engine & Decimal Arithmetic (Python)**: 17 invariant tests covering exact Decimal arithmetic (eliminating IEEE-754 errors), atomic reservation, cross-day budget isolation, and persistent SQLite recovery.
 3. **On-Chain Reconciliation & Settlement Verifier (Python)**: Fail-closed transaction receipt and action hash reconciliation.
 4. **CareRail AI Agent SDK & Tool Interceptor (Python)**: In-memory simulation isolation, proposal formulation, and idempotent retry keys.
@@ -128,7 +128,7 @@ Following rigorous adversarial audits by **DeepSeek-V4.1-Flash** and **Terra (`g
 | :--- | :--- | :--- |
 | **Off-Chain Engine** | Single Python FSM process with SQLite `BEGIN IMMEDIATE` | 3-Node BFT Byzantine Fault Tolerant consensus (Rust + Go + Python) |
 | **Trust Boundary** | HMAC-SHA256 Engine Attestation verified in QuickJS WASM | Intel SGX / Phala TEE Remote Attestation or zk-SNARK proof on-chain |
-| **Formal Verification** | 22 comprehensive property and invariant tests | TLA+ mathematical model of timelock and async callback reentrancy |
+| **Formal Verification** | 23 comprehensive property and invariant tests | TLA+ mathematical model of timelock and async callback reentrancy |
 | **Key Management** | Local Ed25519 signing keys in environment | Hardware Security Module (HSM) and MPC multi-signature integration |
 | **Economic Security** | Technical policy enforcement | Slashing collateral and insurance pool for breach indemnification |
 

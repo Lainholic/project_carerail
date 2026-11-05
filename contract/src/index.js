@@ -172,7 +172,7 @@ export class PolicyVault {
     assert(att.recipient === recipient, "INVALID_ENGINE_ATTESTATION: Recipient mismatch");
     assert(att.amount_yocto === amt.toString(), "INVALID_ENGINE_ATTESTATION: Amount mismatch");
     assert(typeof att.nonce === 'string' && att.nonce.length > 0, "INVALID_ENGINE_ATTESTATION: Missing nonce");
-    assert(typeof att.expires_at === 'string' && att.expires_at.length > 0, "INVALID_ENGINE_ATTESTATION: Missing expires_at");
+    assert(typeof att.expires_at === 'string' && /^\d+$/.test(att.expires_at), "INVALID_ENGINE_ATTESTATION: Missing or invalid expires_at");
     assert(typeof att.sig_hash === 'string' && att.sig_hash.length === 64, "INVALID_ENGINE_ATTESTATION: Invalid sig_hash format");
 
     // Expiry check
@@ -378,7 +378,10 @@ export class PolicyVault {
     // Input sanitization: ensure valid positive BigInt and bounded memo
     assert(typeof recipient === 'string' && recipient.length > 0, "Invalid recipient");
     assert(!memo || memo.length <= 256, "SECURITY_ALERT: Memo exceeds 256 character limit");
-    const amt = BigInt(amount);
+    assert(amount !== undefined && amount !== null, "Invalid amount: required");
+    const amountStr = typeof amount === 'string' ? amount : amount.toString();
+    assert(/^\d+$/.test(amountStr), "Invalid amount: must be positive integer yoctoNEAR string");
+    const amt = BigInt(amountStr);
     assert(amt > BigInt(0), "Amount must be strictly positive");
 
     // Guardrail: Cryptographic Engine Attestation Verification (Fail-Closed)

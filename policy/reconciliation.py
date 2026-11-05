@@ -8,22 +8,34 @@ from decimal import Decimal
 import json
 import os
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 import urllib.request
 import urllib.error
 
 YOCTO_PER_NEAR = Decimal("1000000000000000000000000")
 
 
+DEFAULT_TESTNET_RPCS = [
+    "https://test.rpc.fastnear.com",
+    "https://rpc.testnet.near.org",
+]
+
+
 class NearReconciliationVerifier:
-    def __init__(self, rpc_url: str = "https://rpc.testnet.fastnear.com", timeout_seconds: int = 5, storage=None):
-        self.rpc_url = rpc_url
+    def __init__(self, rpc_url: Optional[Union[str, list]] = None, timeout_seconds: int = 5, storage=None):
+        if rpc_url is None:
+            self.rpc_urls = list(DEFAULT_TESTNET_RPCS)
+        elif isinstance(rpc_url, str):
+            self.rpc_urls = [rpc_url]
+        else:
+            self.rpc_urls = list(rpc_url)
+        self.rpc_url = self.rpc_urls[0] if self.rpc_urls else "https://test.rpc.fastnear.com"
         self.timeout = timeout_seconds
         self.storage = storage
         self.consumed_tx_hashes = set()
 
     def query_tx_status(self, tx_hash: str, sender_id: str) -> Tuple[bool, Optional[dict], str]:
-        """Queries NEAR RPC for transaction outcome."""
+        """Queries NEAR RPC for transaction outcome with automatic multi-endpoint failover."""
         payload = {
             "jsonrpc": "2.0",
             "id": f"rec-{int(time.time()*1000)}",
@@ -34,35 +46,46 @@ class NearReconciliationVerifier:
             }
         }
         data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            self.rpc_url,
-            data=data,
-            headers={"Content-Type": "application/json", "User-Agent": "CareRail-Reconciliation/1.0"}
-        )
+        last_error = "NO_RPC_AVAILABLE"
 
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                res = json.loads(resp.read().decode("utf-8"))
+        for endpoint in self.rpc_urls:
+            req = urllib.request.Request(
+                endpoint,
+                data=data,
+                headers={"Content-Type": "application/json", "User-Agent": "CareRail-Reconciliation/1.0"}
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    res = json.loads(resp.read().decode("utf-8"))
 
-            if "error" in res:
-                return False, None, f"RPC_ERROR: {res['error'].get('message', str(res['error']))}"
+                if "error" in res:
+                    err_msg = res['error'].get('message', str(res['error']))
+                    # If it's a known transaction error (e.g. unknown transaction), return immediately without retry
+                    if "Transaction" in err_msg or "does not exist" in err_msg:
+                        return False, None, f"RPC_ERROR: {err_msg}"
+                    last_error = f"RPC_ERROR: {err_msg}"
+                    continue
 
-            result = res.get("result", {})
-            status = result.get("status", {})
+                result = res.get("result", {})
+                status = result.get("status", {})
 
-            if "SuccessValue" in status:
-                return True, result, "SUCCESS_VALUE"
-            elif "SuccessReceiptId" in status:
-                return True, result, "SUCCESS_RECEIPT"
-            elif "Failure" in status:
-                return False, result, f"ONCHAIN_EXECUTION_FAILURE: {status['Failure']}"
-            else:
-                return False, result, f"UNKNOWN_STATUS: {status}"
+                if "SuccessValue" in status:
+                    return True, result, "SUCCESS_VALUE"
+                elif "SuccessReceiptId" in status:
+                    return True, result, "SUCCESS_RECEIPT"
+                elif "Failure" in status:
+                    return False, result, f"ONCHAIN_EXECUTION_FAILURE: {status['Failure']}"
+                else:
+                    return False, result, f"UNKNOWN_STATUS: {status}"
 
-        except urllib.error.URLError as e:
-            return False, None, f"NETWORK_UNAVAILABLE: {str(e.reason)}"
-        except Exception as e:
-            return False, None, f"QUERY_EXCEPTION: {str(e)}"
+            except urllib.error.URLError as e:
+                last_error = f"NETWORK_UNAVAILABLE ({endpoint}): {str(e.reason)}"
+                continue
+            except Exception as e:
+                last_error = f"QUERY_EXCEPTION ({endpoint}): {str(e)}"
+                continue
+
+        return False, None, last_error
 
     def verify_and_reconcile(
         self,

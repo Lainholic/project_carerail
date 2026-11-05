@@ -279,7 +279,14 @@ class PolicyVaultTestable {
     if (memo && memo.length > 256) {
       throw new Error("SECURITY_ALERT: Memo exceeds 256 character limit");
     }
-    const amt = BigInt(amount);
+    if (amount === undefined || amount === null) {
+      throw new Error("Invalid amount: required");
+    }
+    const amountStr = typeof amount === 'string' ? amount : amount.toString();
+    if (!/^\d+$/.test(amountStr)) {
+      throw new Error("Invalid amount: must be positive integer yoctoNEAR string");
+    }
+    const amt = BigInt(amountStr);
     if (amt <= BigInt(0)) throw new Error("Amount must be strictly positive");
 
     if (this.engine_attestation_key && this.engine_attestation_key.length > 0) {
@@ -865,7 +872,33 @@ async function runTests() {
   }, /Attestation nonce already consumed/);
   console.log("[PASS] Test 22: Attestation Nonce Replay Blocked");
 
-  console.log("\n>>> ALL 22 CONTRACT INVARIANT TESTS PASSED (100%) <<<");
+  // Test 23: Non-Integer & Malformed Amount Injection Blocked (Fail-Closed)
+  assert.throws(() => {
+    vault.propose_payment({
+      recipient: validRecipient,
+      amount: "0.5",
+      memo: "Float Injection"
+    });
+  }, /must be positive integer yoctoNEAR string/);
+
+  assert.throws(() => {
+    vault.propose_payment({
+      recipient: validRecipient,
+      amount: "-1000000000000000000000000",
+      memo: "Negative Amount Injection"
+    });
+  }, /must be positive integer yoctoNEAR string/);
+
+  assert.throws(() => {
+    vault.propose_payment({
+      recipient: validRecipient,
+      amount: "NaN",
+      memo: "NaN Injection"
+    });
+  }, /must be positive integer yoctoNEAR string/);
+  console.log("[PASS] Test 23: Non-Integer & Malformed Amount Injection Blocked");
+
+  console.log("\n>>> ALL 23 CONTRACT INVARIANT TESTS PASSED (100%) <<<");
 }
 
 runTests().catch(err => {
