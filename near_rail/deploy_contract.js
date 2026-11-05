@@ -56,11 +56,11 @@ async function deployAndInit() {
     const deployTxHash = deployResult.transaction ? deployResult.transaction.hash : (deployResult.transaction_outcome ? deployResult.transaction_outcome.id : (deployResult.final_execution_status || "CONFIRMED"));
     console.log(`[Deploy] Contract deployed. Tx: ${deployTxHash}`);
 
-    // 2. Initialize PolicyVault Contract
+    // 2. Initialize PolicyVault Contract (Ignore if already initialized)
     console.log(`[Deploy] Initializing PolicyVault contract...`);
     const initArgs = {
       owner_id: accountId,
-      agent_id: accountId, // Can also be an agent subaccount or dedicated agent key
+      agent_id: accountId,
       allowed_recipients: [
         "uber.testnet",
         "aws.testnet",
@@ -68,30 +68,38 @@ async function deployAndInit() {
         "airline.testnet",
         "hotel.testnet"
       ],
-      max_per_transfer: parseNearAmount("0.5"),        // 0.5 NEAR ceiling
-      max_daily_total: parseNearAmount("2.0"),         // 2.0 NEAR daily
-      owner_approval_threshold: parseNearAmount("0.1") // 0.1 NEAR requires human approval
+      max_per_transfer: parseNearAmount("0.5"),
+      max_daily_total: parseNearAmount("2.0"),
+      owner_approval_threshold: parseNearAmount("0.1")
     };
 
-    let initResult;
+    let initTxHash = "ALREADY_INITIALIZED";
     const gasLimit = BigInt("30000000000000"); // 30 Tgas
-    if (typeof account.functionCall === 'function') {
-      initResult = await account.functionCall({
-        contractId: accountId,
-        methodName: 'init',
-        args: initArgs,
-        gas: gasLimit,
-        attachedDeposit: BigInt(0)
-      });
-    } else {
-      initResult = await account.signAndSendTransaction({
-        receiverId: accountId,
-        actions: [actions.functionCall('init', initArgs, gasLimit, BigInt(0))]
-      });
+    try {
+      let initResult;
+      if (typeof account.functionCall === 'function') {
+        initResult = await account.functionCall({
+          contractId: accountId,
+          methodName: 'init',
+          args: initArgs,
+          gas: gasLimit,
+          attachedDeposit: BigInt(0)
+        });
+      } else {
+        initResult = await account.signAndSendTransaction({
+          receiverId: accountId,
+          actions: [actions.functionCall('init', initArgs, gasLimit, BigInt(0))]
+        });
+      }
+      initTxHash = initResult.transaction ? initResult.transaction.hash : (initResult.transaction_outcome ? initResult.transaction_outcome.id : (initResult.final_execution_status || "CONFIRMED"));
+      console.log(`[Deploy] PolicyVault initialized. Tx: ${initTxHash}`);
+    } catch (err) {
+      if (err.message && err.message.includes("Contract already initialized")) {
+        console.log(`[Deploy] Contract already initialized. Keeping existing on-chain policy.`);
+      } else {
+        throw err;
+      }
     }
-
-    const initTxHash = initResult.transaction ? initResult.transaction.hash : (initResult.transaction_outcome ? initResult.transaction_outcome.id : (initResult.final_execution_status || "CONFIRMED"));
-    console.log(`[Deploy] PolicyVault initialized. Tx: ${initTxHash}`);
 
     console.log(JSON.stringify({
       success: true,

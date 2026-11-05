@@ -13,9 +13,10 @@ class TestNep413OwnerAuth(unittest.TestCase):
     def setUp(self):
         rules_path = os.path.join(os.path.dirname(__file__), "rules.json")
         self.rules = PolicyRules.load_from_json(rules_path)
-        self.engine = CareRailEngine(self.rules)
         self.owner_kp = NearKeyManager.generate_keypair()
         self.attacker_kp = NearKeyManager.generate_keypair()
+        self.rules.owner_public_key = self.owner_kp["public_key"]
+        self.engine = CareRailEngine(self.rules)
 
     def test_cryptographic_owner_approval_success(self):
         # 1. Propose high value item

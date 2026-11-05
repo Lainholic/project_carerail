@@ -15,8 +15,10 @@ class TestCareRailEngine(unittest.TestCase):
     def setUp(self):
         rules_path = os.path.join(os.path.dirname(__file__), "rules.json")
         self.rules = PolicyRules.load_from_json(rules_path)
-        self.engine = CareRailEngine(self.rules)
         self.owner_kp = NearKeyManager.generate_keypair()
+        # Bind authorized owner public key
+        self.rules.owner_public_key = self.owner_kp["public_key"]
+        self.engine = CareRailEngine(self.rules)
 
     def test_normal_approved_transaction(self):
         p = PaymentProposal(
@@ -171,8 +173,8 @@ class TestCareRailEngine(unittest.TestCase):
         self.assertTrue(self.engine.commit_spend("prop-007", "tx-confirmed-777"))
         self.assertEqual(p.state, ProposalState.CONFIRMED)
 
-    def test_unauthenticated_string_token_bypass_rejected(self):
-        """Terra F-01 regression test: Proves that arbitrary string tokens without NEP-413 signatures are strictly rejected."""
+    def test_arbitrary_key_bypass_strictly_rejected(self):
+        """Terra P0 regression test: Attacker submitting valid signature under their OWN key is strictly rejected."""
         p = PaymentProposal(
             proposal_id="prop-008",
             agent_id="agent-care-1",
@@ -184,23 +186,31 @@ class TestCareRailEngine(unittest.TestCase):
         self.engine.evaluate_proposal(p)
         self.assertEqual(p.state, ProposalState.AWAITING_OWNER_APPROVAL)
 
-        # Attempt legacy string token approval -> MUST FAIL
-        ok, msg = self.engine.owner_approve("prop-008", owner_public_key="", signature_b58="")
+        # Attacker generates their own keypair
+        attacker_kp = NearKeyManager.generate_keypair()
+        attacker_sig = Nep413Authorizer.sign_approval(
+            owner_private_key_hex=attacker_kp["private_key_raw_hex"],
+            proposal_id=p.proposal_id,
+            amount_near=p.amount_near,
+            recipient=p.recipient,
+            nonce=p.nonce,
+        )
+
+        # Attempt to approve with attacker key -> MUST FAIL KEY_MISMATCH
+        ok, msg = self.engine.owner_approve("prop-008", attacker_kp["public_key"], attacker_sig)
         self.assertFalse(ok)
-        self.assertIn("CRYPTOGRAPHIC_SIGNATURE_REQUIRED", msg)
+        self.assertIn("KEY_MISMATCH", msg)
         self.assertEqual(p.state, ProposalState.AWAITING_OWNER_APPROVAL)
 
     def test_budget_reservation_prevents_concurrent_overspend(self):
         """Terra F-04 regression test: Pending proposals reserve daily budget immediately upon evaluation."""
-        today_key = self.engine._get_today_key()
-        # Set max limit to 10 NEAR
         self.engine.rules.max_daily_total_near = 10.0
 
         p1 = PaymentProposal(
             proposal_id="prop-reserve-1",
             agent_id="agent-1",
             recipient="care-provider.testnet",
-            amount_near=4.0,  # Requires approval (>2.0)
+            amount_near=4.0,
             intent_memo="Reservation 1",
             nonce=2001,
         )
@@ -211,7 +221,7 @@ class TestCareRailEngine(unittest.TestCase):
             proposal_id="prop-reserve-2",
             agent_id="agent-1",
             recipient="care-provider.testnet",
-            amount_near=4.0,  # Requires approval (>2.0)
+            amount_near=4.0,
             intent_memo="Reservation 2",
             nonce=2002,
         )
@@ -229,10 +239,9 @@ class TestCareRailEngine(unittest.TestCase):
         )
         state3, reason3 = self.engine.evaluate_proposal(p3)
         self.assertEqual(state3, ProposalState.REJECTED)
-        self.assertIn("Amount exceeds available daily budget", reason3)
+        self.assertIn("DAILY_CAP_EXCEEDED", reason3)
 
     def test_invalid_nan_and_negative_amounts_rejected(self):
-        """Terra numeric edge case test: NaN and negative amounts must fail closed."""
         p_nan = PaymentProposal(
             proposal_id="prop-nan",
             agent_id="agent-1",
@@ -250,32 +259,66 @@ class TestCareRailEngine(unittest.TestCase):
             agent_id="agent-1",
             recipient="care-provider.testnet",
             amount_near=-5.0,
-            intent_memo="Negative drain exploit",
+            intent_memo="Negative exploit",
             nonce=3002,
         )
         state, reason = self.engine.evaluate_proposal(p_neg)
         self.assertEqual(state, ProposalState.REJECTED)
         self.assertIn("NUMERIC_VIOLATION", reason)
 
-    def test_cannot_rewrite_settled_proposal(self):
-        """Terra F-05 regression test: Confirmed transactions cannot be rewritten as REJECTED."""
+    def test_strict_fsm_reject_immutability(self):
+        """Terra F-05 regression: Cannot rewrite already confirmed or submitted proposals."""
         p = PaymentProposal(
-            proposal_id="prop-settled-1",
+            proposal_id="prop-fsm-1",
             agent_id="agent-1",
             recipient="care-provider.testnet",
             amount_near=1.0,
-            intent_memo="Settled item",
+            intent_memo="Routine check",
             nonce=4001,
         )
         self.engine.evaluate_proposal(p)
-        self.engine.commit_spend("prop-settled-1", "tx-001")
+        self.engine.commit_spend("prop-fsm-1", "tx-fsm-hash")
         self.assertEqual(p.state, ProposalState.CONFIRMED)
 
         # Attempt to reject confirmed proposal -> MUST FAIL
-        ok, msg = self.engine.owner_reject("prop-settled-1", "Malicious retroactive cancellation")
+        ok, msg = self.engine.owner_reject("prop-fsm-1", "Malicious retroactive tampering")
         self.assertFalse(ok)
-        self.assertIn("CANNOT_REWRITE_SETTLED", msg)
+        self.assertIn("CANNOT_REWRITE_STATE", msg)
         self.assertEqual(p.state, ProposalState.CONFIRMED)
+
+    def test_emergency_pause_and_dust_floor(self):
+        """DeepSeek & Terra P1: Anti-dust floor and emergency pause verification."""
+        # Dust floor test: 0.0005 NEAR < 0.001 NEAR floor
+        p_dust = PaymentProposal(
+            proposal_id="prop-dust",
+            agent_id="agent-1",
+            recipient="care-provider.testnet",
+            amount_near=0.0005,
+            intent_memo="Dust spam attempt",
+            nonce=5001,
+        )
+        state, reason = self.engine.evaluate_proposal(p_dust)
+        self.assertEqual(state, ProposalState.REJECTED)
+        self.assertIn("below minimum floor", reason)
+
+        # Emergency circuit breaker pause test
+        self.engine.set_emergency_pause(True)
+        p_normal = PaymentProposal(
+            proposal_id="prop-pause-test",
+            agent_id="agent-1",
+            recipient="care-provider.testnet",
+            amount_near=1.0,
+            intent_memo="Normal booking while paused",
+            nonce=5002,
+        )
+        state, reason = self.engine.evaluate_proposal(p_normal)
+        self.assertEqual(state, ProposalState.REJECTED)
+        self.assertIn("emergency circuit breaker", reason)
+
+        # Resume engine
+        self.engine.set_emergency_pause(False)
+        state, reason = self.engine.evaluate_proposal(p_normal)
+        self.assertEqual(state, ProposalState.APPROVED)
 
 
 if __name__ == "__main__":

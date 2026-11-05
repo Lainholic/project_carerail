@@ -13,6 +13,9 @@
   "owner_approval_threshold_near": 2.0,
   "request_expiry_seconds": 300,
   "reject_unknown_actions": true,
+  "owner_public_key": "ed25519:6E8sCci9badyRkXb3JoRtubqwUMoVMMNaY2LTCSt6Z11",
+  "min_transfer_floor_near": 0.001,
+  "max_pending_proposals": 50,
   "blocked_memo_keywords": [
     "urgent transfer",
     "bypass",

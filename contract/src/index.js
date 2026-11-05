@@ -1,15 +1,18 @@
 import { NearBindgen, call, view, initialize, near, UnorderedMap, assert } from 'near-sdk-js';
 
 const DAY_IN_NANOSECONDS = BigInt(86400) * BigInt(1000000000);
+const MIN_TRANSFER_FLOOR = BigInt("1000000000000000000000"); // 0.001 NEAR (Anti-Dust Spam Floor)
+const MAX_PENDING_PROPOSALS = 50;
 
 class Proposal {
-  constructor({ id, recipient, amount, memo, state, createdAt }) {
+  constructor({ id, recipient, amount, memo, state, createdAt, submittedDay }) {
     this.id = id;
     this.recipient = recipient;
     this.amount = amount;
     this.memo = memo;
     this.state = state; // "PROPOSED", "AWAITING_OWNER_APPROVAL", "SUBMITTED", "SETTLED", "REJECTED", "FAILED"
     this.createdAt = createdAt;
+    this.submittedDay = submittedDay; // Immutable day index for precise rollback accounting
   }
 }
 
@@ -24,6 +27,8 @@ export class PolicyVault {
     this.owner_approval_threshold = BigInt(0);
     this.spent_today = BigInt(0);
     this.last_reset_day = BigInt(0);
+    this.is_paused = false;
+    this.pending_count = 0;
     this.proposals = new UnorderedMap("p");
     this.proposal_nonce = 0;
   }
@@ -41,6 +46,8 @@ export class PolicyVault {
     this.owner_approval_threshold = BigInt(owner_approval_threshold);
     this.spent_today = BigInt(0);
     this.last_reset_day = near.blockTimestamp() / DAY_IN_NANOSECONDS;
+    this.is_paused = false;
+    this.pending_count = 0;
     this.proposal_nonce = 0;
   }
 
@@ -53,9 +60,20 @@ export class PolicyVault {
     }
   }
 
+  // --- Emergency Circuit Breaker (P1 Feature) ---
+  @call({})
+  set_emergency_pause({ paused }) {
+    const caller = near.predecessorAccountId();
+    assert(caller === this.owner_id, "Only owner can toggle emergency pause");
+    this.is_paused = !!paused;
+    return { is_paused: this.is_paused };
+  }
+
   // --- Agent Propose Function ---
   @call({})
   propose_payment({ recipient, amount, memo }) {
+    assert(!this.is_paused, "SECURITY_ALERT: Vault is paused by emergency circuit breaker");
+
     const caller = near.predecessorAccountId();
     assert(caller === this.agent_id || caller === this.owner_id, "Caller is not authorized agent or owner");
 
@@ -65,6 +83,11 @@ export class PolicyVault {
     assert(typeof recipient === 'string' && recipient.length > 0, "Invalid recipient");
     const amt = BigInt(amount);
     assert(amt > BigInt(0), "Amount must be strictly positive");
+
+    // Guardrail 0: Anti-Dust Spam and Max Pending Ceiling
+    assert(amt >= MIN_TRANSFER_FLOOR, `SECURITY_ALERT: Amount below minimum floor (0.001 NEAR)`);
+    const currentPending = this.pending_count || 0;
+    assert(currentPending < MAX_PENDING_PROPOSALS, "SECURITY_ALERT: Maximum pending proposals reached");
 
     // Guardrail 1: Whitelist Check
     const isWhitelisted = this.allowed_recipients.includes(recipient);
@@ -83,6 +106,7 @@ export class PolicyVault {
     let initialState = "SUBMITTED";
     if (amt > this.owner_approval_threshold) {
       initialState = "AWAITING_OWNER_APPROVAL";
+      this.pending_count = (this.pending_count || 0) + 1;
     }
 
     const proposal = new Proposal({
@@ -91,7 +115,8 @@ export class PolicyVault {
       amount: amt.toString(),
       memo: memo || "",
       state: initialState,
-      createdAt: near.blockTimestamp().toString()
+      createdAt: near.blockTimestamp().toString(),
+      submittedDay: this.last_reset_day.toString()
     });
 
     this.proposals.set(proposalId, proposal);
@@ -120,6 +145,8 @@ export class PolicyVault {
   // --- Owner Manual Approval Function ---
   @call({})
   owner_approve({ proposal_id }) {
+    assert(!this.is_paused, "SECURITY_ALERT: Vault is paused by emergency circuit breaker");
+
     const caller = near.predecessorAccountId();
     assert(caller === this.owner_id, "Only owner can manually approve held proposals");
 
@@ -133,6 +160,8 @@ export class PolicyVault {
 
     this.spent_today += amt;
     proposal.state = "SUBMITTED";
+    proposal.submittedDay = this.last_reset_day.toString();
+    if (this.pending_count && this.pending_count > 0) this.pending_count -= 1;
     this.proposals.set(proposal_id, proposal);
 
     // Execute on-chain transfer with verified callback
@@ -152,14 +181,15 @@ export class PolicyVault {
     return { proposal_id, state: "SUBMITTED", settled_amount: proposal.amount };
   }
 
-  // --- Private Asynchronous Transfer Callback (Terra F-02 Fix) ---
+  // --- Private Asynchronous Transfer Callback (P0 Protected) ---
   @call({})
   on_transfer_callback({ proposal_id, amount }) {
-    // Strictly isolate callback to contract self-calls
+    // Strictly isolate callback to contract self-calls (Blocks external caller hijacking)
     assert(near.predecessorAccountId() === near.currentAccountId(), "Callback is strictly private to contract");
 
     const proposal = this.proposals.get(proposal_id);
     if (!proposal) return false;
+    assert(proposal.state === "SUBMITTED", "Invalid callback state transition");
 
     // Verify whether the attached cross-account transfer receipt succeeded
     try {
@@ -168,12 +198,15 @@ export class PolicyVault {
       this.proposals.set(proposal_id, proposal);
       return true;
     } catch (e) {
-      // Transfer failed on-chain! Rollback spent_today and mark as FAILED
+      // Transfer failed on-chain! Rollback spent_today ONLY if failure happened on same accounting day
       const amt = BigInt(amount);
-      if (this.spent_today >= amt) {
-        this.spent_today -= amt;
-      } else {
-        this.spent_today = BigInt(0);
+      const submittedDay = BigInt(proposal.submittedDay || this.last_reset_day.toString());
+      if (submittedDay === this.last_reset_day) {
+        if (this.spent_today >= amt) {
+          this.spent_today -= amt;
+        } else {
+          this.spent_today = BigInt(0);
+        }
       }
       proposal.state = "FAILED";
       this.proposals.set(proposal_id, proposal);
@@ -181,7 +214,7 @@ export class PolicyVault {
     }
   }
 
-  // --- Owner Rejection Function (Audit Protection Fix) ---
+  // --- Owner Rejection Function (Strict FSM Protected) ---
   @call({})
   owner_reject({ proposal_id, reason }) {
     const caller = near.predecessorAccountId();
@@ -190,8 +223,12 @@ export class PolicyVault {
     const proposal = this.proposals.get(proposal_id);
     assert(proposal !== null, "Proposal does not exist");
 
-    // Terra audit fix: Cannot alter already SETTLED or SUBMITTED proposals
+    // Strict FSM: Only pending proposals can be rejected. Settled/Submitted/Failed are immutable.
     assert(proposal.state === "AWAITING_OWNER_APPROVAL" || proposal.state === "PROPOSED", "Cannot reject settled or active transfer proposal");
+
+    if (proposal.state === "AWAITING_OWNER_APPROVAL" && this.pending_count && this.pending_count > 0) {
+      this.pending_count -= 1;
+    }
 
     proposal.state = "REJECTED";
     proposal.memo = `${proposal.memo} [REJECTED: ${reason || "By owner"}]`;
@@ -210,7 +247,9 @@ export class PolicyVault {
       max_per_transfer: this.max_per_transfer.toString(),
       max_daily_total: this.max_daily_total.toString(),
       owner_approval_threshold: this.owner_approval_threshold.toString(),
-      spent_today: this.spent_today.toString()
+      spent_today: this.spent_today.toString(),
+      is_paused: this.is_paused,
+      pending_count: this.pending_count
     };
   }
 

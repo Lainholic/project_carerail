@@ -18,9 +18,10 @@ class TestCareRailEndToEnd(unittest.TestCase):
     def setUp(self):
         rules_path = os.path.join(os.path.dirname(__file__), "policy", "rules.json")
         self.rules = PolicyRules.load_from_json(rules_path)
+        self.owner_kp = NearKeyManager.generate_keypair()
+        self.rules.owner_public_key = self.owner_kp["public_key"]
         self.engine = CareRailEngine(self.rules)
         self.agent = AutonomousCareAgent("agent-e2e-tester")
-        self.owner_kp = NearKeyManager.generate_keypair()
 
     def test_e2e_legitimate_flow(self):
         # 1. Agent processes normal user request

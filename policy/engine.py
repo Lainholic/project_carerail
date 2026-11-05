@@ -1,7 +1,7 @@
 """CareRail Deterministic FSM Policy Engine
 Enforces fail-closed execution barriers between AI agents and NEAR blockchain.
 Now updated with strict cryptographic-only approvals, atomic budget reservations,
-and immutable nonce replay protection.
+immutable nonce replay protection, anti-dust floors, emergency pause, and day-boundary isolation.
 """
 
 from dataclasses import dataclass, field
@@ -38,6 +38,8 @@ class PolicyRules:
     reject_unknown_actions: bool
     blocked_memo_keywords: List[str]
     owner_public_key: Optional[str] = None
+    min_transfer_floor_near: float = 0.001
+    max_pending_proposals: int = 50
 
     @classmethod
     def load_from_json(cls, path: str) -> "PolicyRules":
@@ -54,6 +56,8 @@ class PolicyRules:
             reject_unknown_actions=bool(data["reject_unknown_actions"]),
             blocked_memo_keywords=[k.lower() for k in data.get("blocked_memo_keywords", [])],
             owner_public_key=data.get("owner_public_key"),
+            min_transfer_floor_near=float(data.get("min_transfer_floor_near", 0.001)),
+            max_pending_proposals=int(data.get("max_pending_proposals", 50)),
         )
 
 
@@ -69,6 +73,7 @@ class PaymentProposal:
     state: ProposalState = ProposalState.PROPOSED
     rejection_reason: Optional[str] = None
     tx_hash: Optional[str] = None
+    submitted_day: str = field(default_factory=lambda: time.strftime("%Y-%m-%d", time.gmtime()))
 
     def compute_hash(self) -> str:
         # Standardized representation without lossy float rounding
@@ -83,6 +88,7 @@ class CareRailEngine:
         self.seen_nonces: set = set()
         self.daily_spend_ledger: Dict[str, float] = {}      # Date string -> settled total NEAR
         self.daily_reserved_ledger: Dict[str, float] = {}   # Date string -> pending reserved NEAR
+        self.is_paused: bool = False
 
     def _get_today_key(self) -> str:
         return time.strftime("%Y-%m-%d", time.gmtime())
@@ -97,19 +103,34 @@ class CareRailEngine:
         reserved = self.daily_reserved_ledger.get(today_key, 0.0)
         return max(0.0, self.rules.max_daily_total_near - (spent + reserved))
 
+    def set_emergency_pause(self, paused: bool) -> bool:
+        self.is_paused = paused
+        return self.is_paused
+
     def evaluate_proposal(self, proposal: PaymentProposal) -> Tuple[ProposalState, Optional[str]]:
         """Strict deterministic FSM transition evaluation.
         Fail-closed: Any violation immediately halts into REJECTED state.
         """
         proposal.state = ProposalState.VALIDATING
 
-        # 0. Float, NaN, and Infinity sanitization
+        # Circuit Breaker Check
+        if self.is_paused:
+            proposal.state = ProposalState.REJECTED
+            proposal.rejection_reason = "SECURITY_ALERT: Engine is paused by emergency circuit breaker"
+            return proposal.state, proposal.rejection_reason
+
+        # 0. Float, NaN, Infinity, and Floor sanitization
         if not isinstance(proposal.amount_near, (int, float)) or not math.isfinite(proposal.amount_near) or proposal.amount_near <= 0.0:
             proposal.state = ProposalState.REJECTED
             proposal.rejection_reason = f"NUMERIC_VIOLATION: Invalid transfer amount {proposal.amount_near}"
             return proposal.state, proposal.rejection_reason
 
-        # 1. Nonce and Proposal ID Replay Protection (Checked BEFORE state alteration)
+        if proposal.amount_near < self.rules.min_transfer_floor_near:
+            proposal.state = ProposalState.REJECTED
+            proposal.rejection_reason = f"SECURITY_ALERT: Amount {proposal.amount_near} below minimum floor ({self.rules.min_transfer_floor_near} NEAR)"
+            return proposal.state, proposal.rejection_reason
+
+        # 1. Nonce and Proposal ID Replay Protection
         if proposal.proposal_id in self.proposals:
             proposal.state = ProposalState.REJECTED
             proposal.rejection_reason = f"DUPLICATE_PROPOSAL_ID: Proposal ID {proposal.proposal_id} already exists"
@@ -156,7 +177,8 @@ class CareRailEngine:
                 proposal.rejection_reason = f"PROMPT_INJECTION_FLAG: Blocked keyword '{kw}' detected in memo"
                 return proposal.state, proposal.rejection_reason
 
-        # Record proposal and consume nonce
+        # Record proposal, submission day, and consume nonce
+        proposal.submitted_day = today_key
         self.seen_nonces.add(proposal.nonce)
         self.proposals[proposal.proposal_id] = proposal
 
@@ -174,9 +196,11 @@ class CareRailEngine:
 
     def owner_approve(self, proposal_id: str, owner_public_key: str, signature_b58: str) -> Tuple[bool, str]:
         """Owner manually approves a held transaction.
-        CRITICAL SECURITY INVARIANT: Only cryptographic NEP-413 Ed25519 signatures are accepted.
-        No unauthenticated tokens or length-based bypasses are permitted.
+        CRITICAL P0: Strictly requires registered owner_public_key. No arbitrary key bypasses.
         """
+        if self.is_paused:
+            return False, "SECURITY_ALERT: Engine is paused by emergency circuit breaker"
+
         proposal = self.proposals.get(proposal_id)
         if not proposal:
             return False, "Proposal not found"
@@ -184,11 +208,14 @@ class CareRailEngine:
         if proposal.state != ProposalState.AWAITING_OWNER_APPROVAL:
             return False, f"Invalid state transition from {proposal.state}"
 
+        if not self.rules.owner_public_key:
+            return False, "CONFIGURATION_ERROR: owner_public_key must be configured in PolicyRules"
+
         if not owner_public_key or not signature_b58:
             return False, "CRYPTOGRAPHIC_SIGNATURE_REQUIRED: Valid owner_public_key and signature_b58 are strictly required"
 
-        # If a designated owner public key is registered in rules, bind verification to it
-        if self.rules.owner_public_key and owner_public_key != self.rules.owner_public_key:
+        # P0 Fix: Enforce identity match with pre-registered authorized owner
+        if owner_public_key != self.rules.owner_public_key:
             return False, f"KEY_MISMATCH: Provided key {owner_public_key} does not match authorized owner {self.rules.owner_public_key}"
 
         from policy.owner_auth import Nep413Authorizer
@@ -211,14 +238,14 @@ class CareRailEngine:
         if not proposal:
             return False, "Proposal not found"
 
-        # Invariant: Settled or Confirmed transactions cannot be rewritten as rejected
-        if proposal.state in (ProposalState.CONFIRMED,):
-            return False, f"CANNOT_REWRITE_SETTLED: Proposal is already {proposal.state}"
+        # P0 Fix: Strictly restrict state transition to pending proposals
+        if proposal.state not in (ProposalState.AWAITING_OWNER_APPROVAL, ProposalState.PROPOSED):
+            return False, f"CANNOT_REWRITE_STATE: Proposal in state {proposal.state} cannot be rejected"
 
-        # Release any reserved budget
-        if proposal.state in (ProposalState.AWAITING_OWNER_APPROVAL, ProposalState.APPROVED, ProposalState.RESERVED):
-            today_key = self._get_today_key()
-            self.daily_reserved_ledger[today_key] = max(0.0, self.daily_reserved_ledger.get(today_key, 0.0) - proposal.amount_near)
+        # Release reserved budget on the EXACT accounting day it was submitted
+        if proposal.state == ProposalState.AWAITING_OWNER_APPROVAL:
+            day_key = proposal.submitted_day
+            self.daily_reserved_ledger[day_key] = max(0.0, self.daily_reserved_ledger.get(day_key, 0.0) - proposal.amount_near)
 
         proposal.state = ProposalState.REJECTED
         proposal.rejection_reason = reason
@@ -230,9 +257,10 @@ class CareRailEngine:
         if not proposal or proposal.state != ProposalState.APPROVED:
             return False
 
+        day_key = proposal.submitted_day
+        # Release reservation and commit to actual spend on the proposal's accounting day
+        self.daily_reserved_ledger[day_key] = max(0.0, self.daily_reserved_ledger.get(day_key, 0.0) - proposal.amount_near)
         today_key = self._get_today_key()
-        # Release reservation and commit to actual spend
-        self.daily_reserved_ledger[today_key] = max(0.0, self.daily_reserved_ledger.get(today_key, 0.0) - proposal.amount_near)
         self.daily_spend_ledger[today_key] = self.daily_spend_ledger.get(today_key, 0.0) + proposal.amount_near
 
         proposal.state = ProposalState.CONFIRMED

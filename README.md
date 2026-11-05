@@ -5,8 +5,8 @@
 > **Secondary Tracks**: `[ 07 / AGT ] Agent Economy`, `[ 04 / BUS ] Autonomous Business`  
 > **License**: MIT  
 > **On-Chain Vault Contract**: [`carerail-274071e4.testnet`](https://testnet.nearblocks.io/address/carerail-274071e4.testnet)  
-> **Contract Deployment Tx**: [`BVrepmjvbKQ3pFcArrzTgi85kcBnHAH5uLpzk9gYy7PB`](https://testnet.nearblocks.io/txns/BVrepmjvbKQ3pFcArrzTgi85kcBnHAH5uLpzk9gYy7PB)  
-> **Live Testnet Settlement**: [`HcemShaNknpZsfsESYRDXeuBRLD9UBaCHBurBxjkXzZR`](https://testnet.nearblocks.io/txns/HcemShaNknpZsfsESYRDXeuBRLD9UBaCHBurBxjkXzZR)
+> **Contract Deployment Tx**: [`HoYEThkufFdPeCkc8haSuRpNpgSStFxECZNkwAWkQQn2`](https://testnet.nearblocks.io/txns/HoYEThkufFdPeCkc8haSuRpNpgSStFxECZNkwAWkQQn2)  
+> **Live Testnet Settlement**: [`CWEZYdHAtx7kPEQrvLsrsdbU3c1ffdfLPoQz2d5F4hk4`](https://testnet.nearblocks.io/txns/CWEZYdHAtx7kPEQrvLsrsdbU3c1ffdfLPoQz2d5F4hk4)
 
 ---
 
@@ -78,8 +78,8 @@ python verify_all.py
 ```
 
 ### Verification Suite Coverage (6/6 Suites - 100% PASS):
-1. `contract/test/test_vault.js`: 6 Smart Contract Invariants (100% PASS)
-2. `policy/test_policy.py`: 7 Policy Engine Deterministic Rules (100% PASS)
+1. `contract/test/test_vault.js`: 12 Smart Contract Invariants (Private callback isolation, day-boundary rollback, emergency killswitch, anti-dust floor) (100% PASS)
+2. `policy/test_policy.py`: 12 Policy Engine Deterministic Rules (Cryptographic owner binding, atomic reservation, strict FSM immutability) (100% PASS)
 3. `test_e2e_scenarios.py`: 3 End-to-End LLM Prompt Injection Scenarios (100% PASS)
 4. `near_rail/client.py`: NEAR Official Testnet RPC Connectivity & Account State (100% PASS)
 5. `near_rail/test_onchain_security.js`: Live On-Chain Protocol Isolation & Red-Team Audit (100% PASS)

@@ -1,11 +1,19 @@
 /**
  * Unit Test for PolicyVault Smart Contract Logic
- * Updated to verify Terra F-02 asynchronous transfer callback and audit protection invariants.
+ * Updated to verify Terra & DeepSeek P0/P1 fixes:
+ * 1. Strict callback privacy (blocks external attacker call)
+ * 2. Day-boundary accounting isolation (past failure doesn't taint today's spend)
+ * 3. Emergency circuit breaker (kill-switch toggle)
+ * 4. Anti-dust floor (blocks sub-0.001 NEAR spam)
+ * 5. Strict FSM state immutability
  */
 
 import assert from 'assert';
 
-// Mock Map to simulate NEAR UnorderedMap
+const DAY_IN_NANOSECONDS = BigInt(86400) * BigInt(1000000000);
+const MIN_TRANSFER_FLOOR = BigInt("1000000000000000000000"); // 0.001 NEAR
+const MAX_PENDING_PROPOSALS = 50;
+
 class MockUnorderedMap {
   constructor(prefix) {
     this.prefix = prefix;
@@ -19,7 +27,6 @@ class MockUnorderedMap {
   }
 }
 
-// Mock NEAR Runtime Environment
 global.near = {
   _timestamp: BigInt(1700000000) * BigInt(1000000000),
   _caller: "agent-01.testnet",
@@ -44,13 +51,14 @@ global.near = {
 };
 
 class Proposal {
-  constructor({ id, recipient, amount, memo, state, createdAt }) {
+  constructor({ id, recipient, amount, memo, state, createdAt, submittedDay }) {
     this.id = id;
     this.recipient = recipient;
     this.amount = amount;
     this.memo = memo;
     this.state = state;
     this.createdAt = createdAt;
+    this.submittedDay = submittedDay;
   }
 }
 
@@ -64,6 +72,8 @@ class PolicyVaultTestable {
     this.owner_approval_threshold = BigInt(0);
     this.spent_today = BigInt(0);
     this.last_reset_day = BigInt(0);
+    this.is_paused = false;
+    this.pending_count = 0;
     this.proposals = new MockUnorderedMap("p");
     this.proposal_nonce = 0;
   }
@@ -76,19 +86,30 @@ class PolicyVaultTestable {
     this.max_daily_total = BigInt(max_daily_total);
     this.owner_approval_threshold = BigInt(owner_approval_threshold);
     this.spent_today = BigInt(0);
-    this.last_reset_day = global.near.blockTimestamp() / (BigInt(86400) * BigInt(1000000000));
+    this.last_reset_day = global.near.blockTimestamp() / DAY_IN_NANOSECONDS;
+    this.is_paused = false;
+    this.pending_count = 0;
     this.proposal_nonce = 0;
   }
 
   _checkAndResetDailyAllowance() {
-    const currentDay = global.near.blockTimestamp() / (BigInt(86400) * BigInt(1000000000));
+    const currentDay = global.near.blockTimestamp() / DAY_IN_NANOSECONDS;
     if (currentDay > this.last_reset_day) {
       this.spent_today = BigInt(0);
       this.last_reset_day = currentDay;
     }
   }
 
+  set_emergency_pause({ paused }) {
+    const caller = global.near.predecessorAccountId();
+    if (caller !== this.owner_id) throw new Error("Only owner can toggle emergency pause");
+    this.is_paused = !!paused;
+    return { is_paused: this.is_paused };
+  }
+
   propose_payment({ recipient, amount, memo }) {
+    if (this.is_paused) throw new Error("SECURITY_ALERT: Vault is paused by emergency circuit breaker");
+
     const caller = global.near.predecessorAccountId();
     if (caller !== this.agent_id && caller !== this.owner_id) {
       throw new Error("Caller is not authorized agent or owner");
@@ -97,6 +118,13 @@ class PolicyVaultTestable {
     this._checkAndResetDailyAllowance();
     const amt = BigInt(amount);
     if (amt <= BigInt(0)) throw new Error("Amount must be strictly positive");
+
+    if (amt < MIN_TRANSFER_FLOOR) {
+      throw new Error("SECURITY_ALERT: Amount below minimum floor (0.001 NEAR)");
+    }
+    if (this.pending_count >= MAX_PENDING_PROPOSALS) {
+      throw new Error("SECURITY_ALERT: Maximum pending proposals reached");
+    }
 
     if (!this.allowed_recipients.includes(recipient)) {
       throw new Error(`SECURITY_VIOLATION: Recipient ${recipient} is not whitelisted`);
@@ -116,6 +144,7 @@ class PolicyVaultTestable {
     let initialState = "SUBMITTED";
     if (amt > this.owner_approval_threshold) {
       initialState = "AWAITING_OWNER_APPROVAL";
+      this.pending_count += 1;
     }
 
     const proposal = new Proposal({
@@ -124,7 +153,8 @@ class PolicyVaultTestable {
       amount: amt.toString(),
       memo: memo || "",
       state: initialState,
-      createdAt: global.near.blockTimestamp().toString()
+      createdAt: global.near.blockTimestamp().toString(),
+      submittedDay: this.last_reset_day.toString()
     });
 
     this.proposals.set(proposalId, proposal);
@@ -137,6 +167,8 @@ class PolicyVaultTestable {
   }
 
   owner_approve({ proposal_id }) {
+    if (this.is_paused) throw new Error("SECURITY_ALERT: Vault is paused by emergency circuit breaker");
+
     const caller = global.near.predecessorAccountId();
     if (caller !== this.owner_id) throw new Error("Only owner can manually approve held proposals");
 
@@ -150,6 +182,8 @@ class PolicyVaultTestable {
 
     this.spent_today += amt;
     proposal.state = "SUBMITTED";
+    proposal.submittedDay = this.last_reset_day.toString();
+    if (this.pending_count > 0) this.pending_count -= 1;
     this.proposals.set(proposal_id, proposal);
 
     return { proposal_id, state: "SUBMITTED", settled_amount: proposal.amount };
@@ -158,11 +192,12 @@ class PolicyVaultTestable {
   on_transfer_callback({ proposal_id, amount, transfer_succeeded = true }) {
     const caller = global.near.predecessorAccountId();
     if (caller !== global.near.currentAccountId()) {
-      throw new Error("Callback is strictly private to contract");
+      throw new Error("SECURITY_ALERT: Callback is strictly private to contract");
     }
 
     const proposal = this.proposals.get(proposal_id);
     if (!proposal) return false;
+    if (proposal.state !== "SUBMITTED") throw new Error("Invalid callback state transition");
 
     if (transfer_succeeded) {
       proposal.state = "SETTLED";
@@ -170,7 +205,11 @@ class PolicyVaultTestable {
       return true;
     } else {
       const amt = BigInt(amount);
-      this.spent_today = this.spent_today >= amt ? this.spent_today - amt : BigInt(0);
+      const submittedDay = BigInt(proposal.submittedDay || this.last_reset_day.toString());
+      // Day boundary isolation: Only rollback today's spend if it matches current day
+      if (submittedDay === this.last_reset_day) {
+        this.spent_today = this.spent_today >= amt ? this.spent_today - amt : BigInt(0);
+      }
       proposal.state = "FAILED";
       this.proposals.set(proposal_id, proposal);
       return false;
@@ -185,6 +224,10 @@ class PolicyVaultTestable {
     if (!proposal) throw new Error("Proposal does not exist");
     if (proposal.state !== "AWAITING_OWNER_APPROVAL" && proposal.state !== "PROPOSED") {
       throw new Error("Cannot reject settled or active transfer proposal");
+    }
+
+    if (proposal.state === "AWAITING_OWNER_APPROVAL" && this.pending_count > 0) {
+      this.pending_count -= 1;
     }
 
     proposal.state = "REJECTED";
@@ -274,7 +317,7 @@ async function runTests() {
   assert.strictEqual(vault.proposals.get(p3.proposal_id).state, "SETTLED");
   console.log("[PASS] Test 6: Owner Approved Held Proposal Settled Successfully");
 
-  // 7. Terra F-02 Defect Fix: Failed transfer rolls back daily spend and sets FAILED
+  // 7. Failed transfer rolls back daily spend and sets FAILED
   global.near._caller = "agent-01.testnet";
   const p4 = vault.propose_payment({
     recipient: "care-clinic.testnet",
@@ -282,7 +325,6 @@ async function runTests() {
     memo: "Failed booking test"
   });
   const spentBefore = vault.spent_today;
-  // Trigger callback failure
   global.near._caller = "vault.testnet";
   vault.on_transfer_callback({
     proposal_id: p4.proposal_id,
@@ -293,14 +335,87 @@ async function runTests() {
   assert.strictEqual(vault.spent_today, spentBefore - BigInt("1000000000000000000000000"));
   console.log("[PASS] Test 7: Failed Transfer Rolls Back Daily Budget (Terra F-02 Fixed)");
 
-  // 8. Terra F-05 Defect Fix: Settled proposal cannot be rewritten via owner_reject
+  // 8. Settled proposal cannot be rewritten via owner_reject
   global.near._caller = "human-owner.testnet";
   assert.throws(() => {
     vault.owner_reject({ proposal_id: p1.proposal_id, reason: "Retroactive tampering" });
   }, /Cannot reject settled or active transfer proposal/);
   console.log("[PASS] Test 8: Cannot Retroactively Tamper With Settled Proposals (Audit Invariant Passed)");
 
-  console.log("\n>>> ALL 8 CONTRACT INVARIANT TESTS PASSED (100%) <<<");
+  // 9. P0: External Attacker Cannot Call Callback Directly
+  global.near._caller = "malicious-hacker.testnet";
+  assert.throws(() => {
+    vault.on_transfer_callback({
+      proposal_id: p1.proposal_id,
+      amount: "1000000000000000000000000",
+      transfer_succeeded: true
+    });
+  }, /SECURITY_ALERT: Callback is strictly private to contract/);
+  console.log("[PASS] Test 9: External Callback Hijacking Blocked (P0 Fixed)");
+
+  // 10. P1: Anti-Dust Spam Floor Protection
+  global.near._caller = "agent-01.testnet";
+  assert.throws(() => {
+    vault.propose_payment({
+      recipient: "care-clinic.testnet",
+      amount: "500000000000000000000", // 0.0005 NEAR (below 0.001 floor)
+      memo: "Dust spam"
+    });
+  }, /SECURITY_ALERT: Amount below minimum floor/);
+  console.log("[PASS] Test 10: Sub-0.001 NEAR Dust Spam Proposal Blocked (P1 Fixed)");
+
+  // 11. P1: Emergency Circuit Breaker (Kill-Switch)
+  global.near._caller = "human-owner.testnet";
+  vault.set_emergency_pause({ paused: true });
+  assert.strictEqual(vault.is_paused, true);
+
+  global.near._caller = "agent-01.testnet";
+  assert.throws(() => {
+    vault.propose_payment({
+      recipient: "care-clinic.testnet",
+      amount: "1000000000000000000000000",
+      memo: "Emergency test"
+    });
+  }, /SECURITY_ALERT: Vault is paused by emergency circuit breaker/);
+
+  // Resume circuit breaker
+  global.near._caller = "human-owner.testnet";
+  vault.set_emergency_pause({ paused: false });
+  assert.strictEqual(vault.is_paused, false);
+  console.log("[PASS] Test 11: Emergency Circuit Breaker Freeze & Resume Verified (P1 Fixed)");
+
+  // 12. P0: Day-Boundary Isolation (Past failure does NOT subtract from today's budget)
+  global.near._caller = "agent-01.testnet";
+  const pPast = vault.propose_payment({
+    recipient: "care-clinic.testnet",
+    amount: "1000000000000000000000000",
+    memo: "Day D Proposal"
+  });
+  // Advance time to next day
+  global.near._timestamp += DAY_IN_NANOSECONDS;
+  vault._checkAndResetDailyAllowance();
+  assert.strictEqual(vault.spent_today, BigInt(0));
+
+  // Today fresh spend of 2 NEAR
+  vault.propose_payment({
+    recipient: "care-clinic.testnet",
+    amount: "2000000000000000000000000",
+    memo: "Day D+1 Proposal"
+  });
+  assert.strictEqual(vault.spent_today, BigInt("2000000000000000000000000"));
+
+  // Now, past Day D proposal callback failure arrives
+  global.near._caller = "vault.testnet";
+  vault.on_transfer_callback({
+    proposal_id: pPast.proposal_id,
+    amount: "1000000000000000000000000",
+    transfer_succeeded: false
+  });
+  // Today's spent MUST remain 2 NEAR, NOT corrupted by 1 NEAR reduction!
+  assert.strictEqual(vault.spent_today, BigInt("2000000000000000000000000"));
+  console.log("[PASS] Test 12: Day-Boundary Accounting Isolation Verified (P0 Fixed)");
+
+  console.log("\n>>> ALL 12 CONTRACT INVARIANT TESTS PASSED (100%) <<<");
 }
 
 runTests().catch(err => {
