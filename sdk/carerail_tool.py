@@ -124,8 +124,19 @@ class CareRailPaymentTool:
             real_tx_hash = None
 
             if self.simulation_mode:
-                # Isolated simulation mode - NEVER touches live blockchain or dispatcher (Terra Round 7 P1-5 Fixed)
+                # Isolated simulation mode - NEVER touches live blockchain and releases temp reservation (Terra Round 8 P1-3 Fixed)
                 real_tx_hash = f"sim-tx-{proposal_id}-{int(time.time())}"
+                self.engine.release_reservation(proposal_id, reason="SIMULATION_COMPLETED")
+                return {
+                    "success": True,
+                    "state": "SIMULATED_SETTLED",
+                    "proposal_id": proposal_id,
+                    "tx_hash": real_tx_hash,
+                    "recipient": recipient,
+                    "amount_near": float(proposal.amount_near),
+                    "remaining_daily_budget": self.engine.get_remaining_daily_budget(),
+                    "feedback_for_llm": f"SIMULATION_CONFIRMED: Policy approved {proposal.amount_near} NEAR transfer to {recipient}. (Simulation mode: zero live state mutated)."
+                }
             elif self.onchain_dispatcher:
                 # Production mode: Must have verifier to prevent phantom settlement (Terra Round 7 P0-1 Fixed)
                 if not self.verifier:
@@ -151,7 +162,7 @@ class CareRailPaymentTool:
                     }
                 real_tx_hash = dispatch_result
 
-                # Cross-verify with NearReconciliationVerifier before claiming SETTLED (Terra Round 6 & 7 P0-1 Fixed)
+                # Cross-verify with NearReconciliationVerifier before claiming SETTLED (Terra Round 6, 7, 8 Fixed)
                 rec_ok, rec_msg = self.verifier.verify_and_reconcile(
                     tx_hash=real_tx_hash,
                     sender_id=self.agent_id,
@@ -162,13 +173,21 @@ class CareRailPaymentTool:
                     allow_mock=False
                 )
                 if not rec_ok:
-                    self.engine.release_reservation(proposal_id, reason=f"RECONCILIATION_FAILED: {rec_msg}")
+                    # Invariant P0-1 (Terra Round 8): DO NOT release reservation on unverified broadcast.
+                    # Retain reservation to prevent double-spending; mark state as UNKNOWN / PENDING_RECONCILIATION.
+                    proposal.state = ProposalState.UNKNOWN
+                    self.engine.storage.save_proposal(proposal.__dict__)
                     return {
                         "success": False,
-                        "state": "RECONCILIATION_FAILED",
+                        "state": "PENDING_RECONCILIATION",
                         "proposal_id": proposal_id,
-                        "reason": f"ONCHAIN_SETTLEMENT_UNVERIFIED: {rec_msg}",
-                        "feedback_for_llm": f"PAYMENT_UNVERIFIED: Blockchain transaction failed settlement reconciliation ({rec_msg}). Spend reservation rolled back."
+                        "tx_hash": real_tx_hash,
+                        "reason": f"ONCHAIN_SETTLEMENT_PENDING: {rec_msg}",
+                        "feedback_for_llm": (
+                            f"PAYMENT_PENDING: Transaction broadcast to NEAR network (Tx: {real_tx_hash}), "
+                            f"but final reconciliation is unconfirmed ({rec_msg}). "
+                            f"Budget reservation remains locked to prevent double-spending. DO NOT retry."
+                        )
                     }
             else:
                 # Production mode without dispatcher -> Strictly refuse to settle phantom payments (Terra P0 Fix)
@@ -184,12 +203,14 @@ class CareRailPaymentTool:
             # Commit settled spend in persistent ledger
             commit_ok = self.engine.commit_spend(proposal_id, real_tx_hash)
             if not commit_ok:
-                self.engine.release_reservation(proposal_id, reason="COMMIT_FAILED")
+                proposal.state = ProposalState.UNKNOWN
+                self.engine.storage.save_proposal(proposal.__dict__)
                 return {
                     "success": False,
-                    "state": "COMMIT_FAILED",
+                    "state": "COMMIT_UNRESOLVED",
                     "proposal_id": proposal_id,
-                    "reason": "Failed to settle spend in persistent ledger"
+                    "tx_hash": real_tx_hash,
+                    "reason": "Failed to shift reservation to confirmed spend in ledger (manual intervention required)"
                 }
 
             final_state = "SIMULATED_SETTLED" if self.simulation_mode else "SETTLED"

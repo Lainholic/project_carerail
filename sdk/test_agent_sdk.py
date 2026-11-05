@@ -123,10 +123,10 @@ class TestCareRailPaymentTool(unittest.TestCase):
             intent_memo="Testing unverified hash"
         )
         self.assertFalse(res["success"])
-        self.assertEqual(res["state"], "RECONCILIATION_FAILED")
+        self.assertEqual(res["state"], "PENDING_RECONCILIATION")
         self.assertIn("TARGET_CONTRACT_MISMATCH", res["reason"])
-        # Invariant: Budget reservation must be released
-        self.assertEqual(self.engine.get_remaining_daily_budget(), init_budget)
+        # Invariant (Terra Round 8 P0-1): Budget reservation must NOT be rolled back on unconfirmed broadcast to prevent double-spending
+        self.assertLess(self.engine.get_remaining_daily_budget(), init_budget)
 
     def test_terra_p1_dispatch_failure_rolls_back_reservation(self):
         """Terra Round 6 P1-5: If on-chain broadcast fails, reserved funds must be rolled back."""

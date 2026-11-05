@@ -127,7 +127,7 @@ class NearReconciliationVerifier:
         if not verified_call:
             return False, "NO_MATCHING_PROPOSE_PAYMENT_ACTION_FOUND"
 
-        # 4. Verify execution return value (Strict Fail-Closed check for SUBMITTED) (Terra Round 7 P1-1 Fixed)
+        # 4. Verify execution return value (Accepts both callback boolean true and SUBMITTED/SETTLED dict) (Terra Round 8 P1-1 Fixed)
         final_status = res.get("status", {})
         success_val_b64 = final_status.get("SuccessValue")
         if not success_val_b64:
@@ -140,17 +140,20 @@ class NearReconciliationVerifier:
         try:
             decoded = base64.b64decode(success_val_b64).decode("utf-8")
             ret_json = json.loads(decoded)
-            if not isinstance(ret_json, dict):
-                return False, "INVALID_RETURN_VALUE: Expected JSON object return from contract"
-            prop_state = ret_json.get("state")
-            if not prop_state:
-                return False, "INCOMPLETE_RETURN_VALUE: Proposal state is missing in return payload"
-            if prop_state == "AWAITING_OWNER_APPROVAL":
-                return False, "PAYMENT_NOT_SETTLED_YET: Proposal held in AWAITING_OWNER_APPROVAL state"
-            if prop_state != "SUBMITTED":
-                return False, f"UNEXPECTED_PROPOSAL_STATE: Proposal is in '{prop_state}', not SUBMITTED"
-            if expected_proposal_id and ret_json.get("proposal_id") and ret_json.get("proposal_id") != expected_proposal_id:
-                return False, f"PROPOSAL_ID_MISMATCH: Expected {expected_proposal_id}, got {ret_json.get('proposal_id')}"
+            if isinstance(ret_json, bool):
+                if not ret_json:
+                    return False, "CALLBACK_RETURNED_FALSE: Transfer callback signaled failure"
+                # Boolean True confirms on_transfer_callback settled successfully
+            elif isinstance(ret_json, dict):
+                prop_state = ret_json.get("state")
+                if prop_state == "AWAITING_OWNER_APPROVAL":
+                    return False, "PAYMENT_NOT_SETTLED_YET: Proposal held in AWAITING_OWNER_APPROVAL state"
+                if prop_state and prop_state not in ("SUBMITTED", "SETTLED"):
+                    return False, f"UNEXPECTED_PROPOSAL_STATE: Proposal is in '{prop_state}', not SUBMITTED/SETTLED"
+                if expected_proposal_id and ret_json.get("proposal_id") and ret_json.get("proposal_id") != expected_proposal_id:
+                    return False, f"PROPOSAL_ID_MISMATCH: Expected {expected_proposal_id}, got {ret_json.get('proposal_id')}"
+            else:
+                return False, f"UNEXPECTED_RETURN_TYPE: Expected boolean or JSON object, got {type(ret_json).__name__}"
         except Exception as ret_err:
             return False, f"RETURN_VALUE_DECODING_ERROR: {str(ret_err)}"
 
