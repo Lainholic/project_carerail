@@ -1,11 +1,12 @@
 """CareRail Deterministic FSM Policy Engine
 Enforces fail-closed execution barriers between AI agents and NEAR blockchain.
-Now updated with strict cryptographic-only approvals, atomic budget reservations,
-immutable nonce replay protection, anti-dust floors, emergency pause, day-boundary isolation,
-SQLite persistent ledger storage with full proposal restoration, and atomic multi-statement transitions.
+Now updated with exact Decimal arithmetic to eliminate IEEE-754 floating-point rounding errors (P2-2).
+Features cryptographic approvals, atomic budget reservations, immutable nonce replay protection,
+anti-dust floors, emergency pause, day-boundary isolation, and SQLite atomic transactions.
 """
 
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation, getcontext
 from enum import Enum
 import hashlib
 import json
@@ -13,9 +14,32 @@ import math
 import os
 import re
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from policy.storage import PersistentLedgerStorage
+
+# 36 decimal places precision for yoctoNEAR level math (1 NEAR = 10^24 yocto)
+getcontext().prec = 36
+
+
+def _to_decimal(val: Union[int, float, str, Decimal]) -> Decimal:
+    """Safe conversion to exact Decimal, rejecting NaN, Inf, and invalid strings."""
+    if isinstance(val, Decimal):
+        if not val.is_finite():
+            raise ValueError("Non-finite Decimal")
+        return val
+    if isinstance(val, float):
+        if not math.isfinite(val):
+            raise ValueError("Non-finite float")
+        return Decimal(str(val))
+    if isinstance(val, int):
+        return Decimal(val)
+    if isinstance(val, str):
+        d = Decimal(val)
+        if not d.is_finite():
+            raise ValueError("Non-finite string representation")
+        return d
+    raise TypeError(f"Cannot convert type {type(val)} to Decimal")
 
 
 class ProposalState(str, Enum):
@@ -70,7 +94,7 @@ class PaymentProposal:
     proposal_id: str
     agent_id: str
     recipient: str
-    amount_near: float
+    amount_near: Union[float, Decimal]
     intent_memo: str
     nonce: int
     created_at: float = field(default_factory=time.time)
@@ -90,8 +114,8 @@ class CareRailEngine:
         self.storage = PersistentLedgerStorage(db_path)
         self.proposals: Dict[str, PaymentProposal] = {}
         self.seen_nonces: set = self.storage.get_all_nonces()
-        self.daily_spend_ledger: Dict[str, float] = {}      # Date string -> settled total NEAR
-        self.daily_reserved_ledger: Dict[str, float] = {}   # Date string -> pending reserved NEAR
+        self.daily_spend_ledger: Dict[str, Decimal] = {}      # Date string -> settled total Decimal
+        self.daily_reserved_ledger: Dict[str, Decimal] = {}   # Date string -> pending reserved Decimal
         self.is_paused: bool = self.storage.get_pause_state()
 
         # 1. Restore all daily ledgers from storage
@@ -102,14 +126,17 @@ class CareRailEngine:
 
         today_key = self._get_today_key()
         if today_key not in self.daily_spend_ledger:
-            self.daily_spend_ledger[today_key] = 0.0
-            self.daily_reserved_ledger[today_key] = 0.0
+            self.daily_spend_ledger[today_key] = Decimal("0")
+            self.daily_reserved_ledger[today_key] = Decimal("0")
 
-        # 2. Restore all persistent proposals across restarts (Fix for P1-B restoration gap)
+        # 2. Restore all persistent proposals across restarts (P1-B complete restoration)
         stored_proposals = self.storage.get_all_proposals()
         for pid, p in stored_proposals.items():
             try:
-                state_enum = ProposalState(p["state"])
+                raw_st = str(p["state"])
+                if raw_st.startswith("ProposalState."):
+                    raw_st = raw_st.split(".", 1)[1]
+                state_enum = ProposalState(raw_st)
             except ValueError:
                 state_enum = ProposalState.REJECTED
 
@@ -117,7 +144,7 @@ class CareRailEngine:
                 proposal_id=p["proposal_id"],
                 agent_id=p["agent_id"],
                 recipient=p["recipient"],
-                amount_near=float(p["amount_near"]),
+                amount_near=float(Decimal(p["amount_near"])),
                 intent_memo=p["intent_memo"],
                 nonce=int(p["nonce"]),
                 created_at=float(p["created_at"]),
@@ -129,18 +156,39 @@ class CareRailEngine:
             self.proposals[pid] = restored_proposal
             self.seen_nonces.add(int(p["nonce"]))
 
+    @property
+    def _max_per_tx_dec(self) -> Decimal:
+        return _to_decimal(self.rules.max_per_transfer_near)
+
+    @property
+    def _max_daily_dec(self) -> Decimal:
+        return _to_decimal(self.rules.max_daily_total_near)
+
+    @property
+    def _owner_thresh_dec(self) -> Decimal:
+        return _to_decimal(self.rules.owner_approval_threshold_near)
+
+    @property
+    def _min_floor_dec(self) -> Decimal:
+        return _to_decimal(self.rules.min_transfer_floor_near)
+
     def _get_today_key(self) -> str:
         return time.strftime("%Y-%m-%d", time.gmtime())
 
     def get_today_spent(self) -> float:
         today_key = self._get_today_key()
-        return self.daily_spend_ledger.get(today_key, 0.0)
+        return float(self.daily_spend_ledger.get(today_key, Decimal("0")))
+
+    def get_today_spent_dec(self) -> Decimal:
+        today_key = self._get_today_key()
+        return self.daily_spend_ledger.get(today_key, Decimal("0"))
 
     def get_remaining_daily_budget(self) -> float:
         today_key = self._get_today_key()
-        spent = self.daily_spend_ledger.get(today_key, 0.0)
-        reserved = self.daily_reserved_ledger.get(today_key, 0.0)
-        return max(0.0, self.rules.max_daily_total_near - (spent + reserved))
+        spent = self.daily_spend_ledger.get(today_key, Decimal("0"))
+        reserved = self.daily_reserved_ledger.get(today_key, Decimal("0"))
+        rem = self._max_daily_dec - (spent + reserved)
+        return float(max(Decimal("0"), rem))
 
     def set_emergency_pause(self, paused: bool) -> bool:
         self.is_paused = paused
@@ -150,6 +198,7 @@ class CareRailEngine:
     def evaluate_proposal(self, proposal: PaymentProposal) -> Tuple[ProposalState, Optional[str]]:
         """Strict deterministic FSM transition evaluation.
         Fail-closed: Any violation immediately halts into REJECTED state.
+        Uses exact Decimal arithmetic for all financial comparisons.
         """
         # Invariant P0-B: Check duplicate BEFORE mutating any state on the passed proposal object
         if proposal.proposal_id in self.proposals:
@@ -172,13 +221,19 @@ class CareRailEngine:
             proposal.rejection_reason = "SECURITY_ALERT: Engine is paused by emergency circuit breaker"
             return proposal.state, proposal.rejection_reason
 
-        # 0. Float, NaN, Infinity, and Floor sanitization
-        if not isinstance(proposal.amount_near, (int, float)) or not math.isfinite(proposal.amount_near) or proposal.amount_near <= 0.0:
+        # 0. Float, NaN, Infinity, and Floor sanitization with exact Decimal conversion
+        try:
+            amt_dec = _to_decimal(proposal.amount_near)
+            if amt_dec <= Decimal("0"):
+                proposal.state = ProposalState.REJECTED
+                proposal.rejection_reason = "NUMERIC_VIOLATION: Payment amount must be a positive finite number"
+                return proposal.state, proposal.rejection_reason
+        except (ValueError, TypeError, InvalidOperation):
             proposal.state = ProposalState.REJECTED
             proposal.rejection_reason = "NUMERIC_VIOLATION: Payment amount must be a positive finite number"
             return proposal.state, proposal.rejection_reason
 
-        if proposal.amount_near < self.rules.min_transfer_floor_near:
+        if amt_dec < self._min_floor_dec:
             proposal.state = ProposalState.REJECTED
             proposal.rejection_reason = f"ANTI_DUST_FLOOR_VIOLATION: Amount {proposal.amount_near} NEAR is below minimum floor {self.rules.min_transfer_floor_near} NEAR"
             return proposal.state, proposal.rejection_reason
@@ -203,20 +258,23 @@ class CareRailEngine:
             proposal.rejection_reason = "REQUEST_EXPIRED: Proposal exceeded max validity window"
             return proposal.state, proposal.rejection_reason
 
-        # 4. Per-Transfer Ceiling
-        if proposal.amount_near > self.rules.max_per_transfer_near:
+        # 4. Per-Transfer Ceiling (exact Decimal)
+        if amt_dec > self._max_per_tx_dec:
             proposal.state = ProposalState.REJECTED
             proposal.rejection_reason = f"LIMIT_EXCEEDED: Amount {proposal.amount_near} NEAR exceeds max per transfer limit {self.rules.max_per_transfer_near} NEAR"
             return proposal.state, proposal.rejection_reason
 
-        # 5. Daily Total Ceiling with Headroom Reservation
+        # 5. Daily Total Ceiling with Headroom Reservation (exact Decimal)
         today_key = self._get_today_key()
-        current_spent = self.daily_spend_ledger.get(today_key, 0.0)
-        current_reserved = self.daily_reserved_ledger.get(today_key, 0.0)
+        current_spent = _to_decimal(self.daily_spend_ledger.get(today_key, Decimal("0")))
+        current_reserved = _to_decimal(self.daily_reserved_ledger.get(today_key, Decimal("0")))
 
-        if (current_spent + current_reserved + proposal.amount_near) > self.rules.max_daily_total_near:
+        if (current_spent + current_reserved + amt_dec) > self._max_daily_dec:
             proposal.state = ProposalState.REJECTED
-            proposal.rejection_reason = f"DAILY_CAP_EXCEEDED: Amount exceeds available daily budget (Spent: {current_spent}, Reserved: {current_reserved}, Max: {self.rules.max_daily_total_near})"
+            proposal.rejection_reason = (
+                f"DAILY_CAP_EXCEEDED: Amount exceeds available daily budget "
+                f"(Spent: {float(current_spent)}, Reserved: {float(current_reserved)}, Max: {self.rules.max_daily_total_near})"
+            )
             return proposal.state, proposal.rejection_reason
 
         # 6. Prompt Injection Defense (Semantic anomaly keyword filtering)
@@ -238,18 +296,20 @@ class CareRailEngine:
         self.seen_nonces.add(proposal.nonce)
         self.proposals[proposal.proposal_id] = proposal
 
-        # 7. Human-in-the-Loop threshold check
-        if proposal.amount_near > self.rules.owner_approval_threshold_near:
+        # 7. Human-in-the-Loop threshold check (exact Decimal)
+        if amt_dec > self._owner_thresh_dec:
             proposal.state = ProposalState.AWAITING_OWNER_APPROVAL
-            self.daily_reserved_ledger[today_key] = current_reserved + proposal.amount_near
-            self.storage.set_daily_reserved(today_key, self.daily_reserved_ledger[today_key])
+            new_reserved = current_reserved + amt_dec
+            self.daily_reserved_ledger[today_key] = new_reserved
+            self.storage.set_daily_reserved(today_key, new_reserved)
             self.storage.save_proposal(proposal.__dict__)
             return proposal.state, None
 
         # 8. All standard criteria passed -> APPROVED with reservation
         proposal.state = ProposalState.APPROVED
-        self.daily_reserved_ledger[today_key] = current_reserved + proposal.amount_near
-        self.storage.set_daily_reserved(today_key, self.daily_reserved_ledger[today_key])
+        new_reserved = current_reserved + amt_dec
+        self.daily_reserved_ledger[today_key] = new_reserved
+        self.storage.set_daily_reserved(today_key, new_reserved)
         self.storage.save_proposal(proposal.__dict__)
         return proposal.state, None
 
@@ -281,7 +341,7 @@ class CareRailEngine:
         is_valid = Nep413Authorizer.verify_approval(
             owner_public_key=owner_public_key,
             proposal_id=proposal.proposal_id,
-            amount_near=proposal.amount_near,
+            amount_near=float(proposal.amount_near),
             recipient=proposal.recipient,
             nonce=proposal.nonce,
             signature_b58=signature_b58,
@@ -307,7 +367,9 @@ class CareRailEngine:
 
         if proposal.state == ProposalState.AWAITING_OWNER_APPROVAL:
             day_key = proposal.submitted_day
-            self.daily_reserved_ledger[day_key] = max(0.0, self.daily_reserved_ledger.get(day_key, 0.0) - proposal.amount_near)
+            amt_dec = _to_decimal(proposal.amount_near)
+            cur_res = self.daily_reserved_ledger.get(day_key, Decimal("0"))
+            self.daily_reserved_ledger[day_key] = max(Decimal("0"), cur_res - amt_dec)
 
         proposal.state = ProposalState.REJECTED
         proposal.rejection_reason = reason
@@ -322,7 +384,7 @@ class CareRailEngine:
             return False
 
         today_key = self._get_today_key()
-        success, msg = self.storage.atomic_commit_spend(proposal_id, tx_hash, today_key, self.rules.max_daily_total_near)
+        success, msg = self.storage.atomic_commit_spend(proposal_id, tx_hash, today_key, self._max_daily_dec)
         if not success:
             return False
 

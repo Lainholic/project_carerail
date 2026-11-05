@@ -427,6 +427,51 @@ class TestCareRailEngine(unittest.TestCase):
             if os.path.exists(test_db):
                 os.remove(test_db)
 
+    def test_p2_2_exact_decimal_arithmetic_prevents_rounding_errors(self):
+        """Terra P2-2 Regression: Decimal arithmetic prevents IEEE-754 binary floating point precision leakage."""
+        # In standard float: 0.1 + 0.2 = 0.30000000000000004 > 0.30
+        self.engine.rules.max_daily_total_near = 0.30
+        self.engine.rules.max_per_transfer_near = 0.30
+
+        p1 = PaymentProposal(
+            proposal_id="prop-dec-1",
+            agent_id="agent-1",
+            recipient="care-provider.testnet",
+            amount_near=0.1,
+            intent_memo="0.1 payment",
+            nonce=11111,
+        )
+        state1, _ = self.engine.evaluate_proposal(p1)
+        self.assertEqual(state1, ProposalState.APPROVED)
+        self.engine.commit_spend("prop-dec-1", "tx-dec-1")
+
+        p2 = PaymentProposal(
+            proposal_id="prop-dec-2",
+            agent_id="agent-1",
+            recipient="care-provider.testnet",
+            amount_near=0.2,
+            intent_memo="0.2 payment",
+            nonce=11112,
+        )
+        # In float, 0.1 + 0.2 = 0.30000000000000004 which would falsely exceed 0.30!
+        # With exact Decimal, 0.1 + 0.2 == 0.30 EXACTLY, so it must be APPROVED!
+        state2, reason2 = self.engine.evaluate_proposal(p2)
+        self.assertEqual(state2, ProposalState.APPROVED, f"False rejection due to float inaccuracy: {reason2}")
+        self.engine.commit_spend("prop-dec-2", "tx-dec-2")
+
+        # Third proposal of 0.001 must now be strictly rejected
+        p3 = PaymentProposal(
+            proposal_id="prop-dec-3",
+            agent_id="agent-1",
+            recipient="care-provider.testnet",
+            amount_near=0.001,
+            intent_memo="0.001 over budget",
+            nonce=11113,
+        )
+        state3, reason3 = self.engine.evaluate_proposal(p3)
+        self.assertEqual(state3, ProposalState.REJECTED)
+        self.assertIn("DAILY_CAP_EXCEEDED", reason3)
+
     def test_p1_b_pending_proposals_restored_and_approved_after_restart(self):
         """Terra & DeepSeek P1-B Regression: Proposals awaiting owner approval must restore across restart and be approvable."""
         test_db = os.path.join(os.path.dirname(__file__), "test_pending_restore.db")
@@ -486,6 +531,51 @@ class TestCareRailEngine(unittest.TestCase):
         finally:
             if os.path.exists(test_db):
                 os.remove(test_db)
+
+    def test_p2_2_exact_decimal_arithmetic_prevents_rounding_errors(self):
+        """Terra P2-2 Regression: Decimal arithmetic prevents IEEE-754 binary floating point precision leakage."""
+        # In standard float: 0.1 + 0.2 = 0.30000000000000004 > 0.30
+        self.engine.rules.max_daily_total_near = 0.30
+        self.engine.rules.max_per_transfer_near = 0.30
+
+        p1 = PaymentProposal(
+            proposal_id="prop-dec-1",
+            agent_id="agent-1",
+            recipient="care-provider.testnet",
+            amount_near=0.1,
+            intent_memo="0.1 payment",
+            nonce=11111,
+        )
+        state1, _ = self.engine.evaluate_proposal(p1)
+        self.assertEqual(state1, ProposalState.APPROVED)
+        self.engine.commit_spend("prop-dec-1", "tx-dec-1")
+
+        p2 = PaymentProposal(
+            proposal_id="prop-dec-2",
+            agent_id="agent-1",
+            recipient="care-provider.testnet",
+            amount_near=0.2,
+            intent_memo="0.2 payment",
+            nonce=11112,
+        )
+        # In float, 0.1 + 0.2 = 0.30000000000000004 which would falsely exceed 0.30!
+        # With exact Decimal, 0.1 + 0.2 == 0.30 EXACTLY, so it must be APPROVED!
+        state2, reason2 = self.engine.evaluate_proposal(p2)
+        self.assertEqual(state2, ProposalState.APPROVED, f"False rejection due to float inaccuracy: {reason2}")
+        self.engine.commit_spend("prop-dec-2", "tx-dec-2")
+
+        # Third proposal of 0.001 must now be strictly rejected
+        p3 = PaymentProposal(
+            proposal_id="prop-dec-3",
+            agent_id="agent-1",
+            recipient="care-provider.testnet",
+            amount_near=0.001,
+            intent_memo="0.001 over budget",
+            nonce=11113,
+        )
+        state3, reason3 = self.engine.evaluate_proposal(p3)
+        self.assertEqual(state3, ProposalState.REJECTED)
+        self.assertIn("DAILY_CAP_EXCEEDED", reason3)
 
 
 if __name__ == "__main__":

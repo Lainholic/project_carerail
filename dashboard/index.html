@@ -399,10 +399,10 @@
       </span>
     </div>
     <div class="status-group">
-      <div class="pill pill-green">
-        <span class="dot"></span> FASTNEAR RPC (TESTNET)
+      <div class="pill pill-green" id="rpcStatusPill">
+        <span class="dot"></span> FASTNEAR RPC: LIVE
       </div>
-      <div class="pill">
+      <div class="pill" id="rpcBalancePill" style="font-family:var(--font-mono); color:var(--accent-blue);">
         VAULT: <a href="https://testnet.nearblocks.io/address/carerail-274071e4.testnet" target="_blank" style="color:var(--accent-blue); text-decoration:none; margin-left:4px;">carerail-274071e4.testnet</a>
       </div>
       <button id="btnKillswitch" class="btn btn-secondary" onclick="toggleEmergencyPause()">
@@ -419,7 +419,7 @@
       <div class="progress-bar-bg">
         <div class="progress-bar-fill" id="barDailyBudget" style="width: 92.5%;"></div>
       </div>
-      <span class="card-meta">Remaining: 0.15 NEAR (Resets 00:00 UTC)</span>
+      <span class="card-meta" id="metaDailyBudget">Remaining: 0.15 NEAR (Resets 00:00 UTC)</span>
     </div>
 
     <div class="card">
@@ -569,9 +569,97 @@
 </div>
 
 <script>
+  const RPC_URL = "https://rpc.testnet.fastnear.com";
+  const CONTRACT_ID = "carerail-274071e4.testnet";
   let isPaused = false;
   let blockedCount = 14;
   let currentProposalId = null;
+
+  async function queryRpc(method, params) {
+    try {
+      const res = await fetch(RPC_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "dashboard-" + Date.now(),
+          method: method,
+          params: params
+        })
+      });
+      return await res.json();
+    } catch (e) {
+      console.warn("RPC query error:", e);
+      return null;
+    }
+  }
+
+  async function refreshLiveOnChainState() {
+    try {
+      // 1. Fetch Contract Balance via view_account
+      const accData = await queryRpc("query", {
+        request_type: "view_account",
+        finality: "final",
+        account_id: CONTRACT_ID
+      });
+      if (accData && accData.result && accData.result.amount) {
+        const yocto = BigInt(accData.result.amount);
+        const nearVal = (Number(yocto / 1000000000000000000000n) / 1000).toFixed(2);
+        const pill = document.getElementById('rpcBalancePill');
+        if (pill) {
+          pill.innerHTML = `VAULT: <a href="https://testnet.nearblocks.io/address/${CONTRACT_ID}" target="_blank" style="color:var(--accent-blue); text-decoration:none; margin-left:4px;">${CONTRACT_ID} (${nearVal} NEAR)</a>`;
+        }
+      }
+
+      // 2. Fetch Vault View State via call_function
+      const viewData = await queryRpc("query", {
+        request_type: "call_function",
+        finality: "final",
+        account_id: CONTRACT_ID,
+        method_name: "get_vault_state",
+        args_base64: btoa("{}")
+      });
+
+      if (viewData && viewData.result && viewData.result.result) {
+        const bytes = new Uint8Array(viewData.result.result);
+        const str = new TextDecoder().decode(bytes);
+        const state = JSON.parse(str);
+
+        const spentYocto = BigInt(state.spent_today || "0");
+        const limitYocto = BigInt(state.daily_limit || "2000000000000000000000000");
+        const spentNear = (Number(spentYocto / 1000000000000000000000n) / 1000);
+        const limitNear = (Number(limitYocto / 1000000000000000000000n) / 1000);
+        const pct = Math.min(100, Math.max(0, (spentNear / (limitNear || 2.0)) * 100)).toFixed(1);
+
+        document.getElementById('valDailyBudget').innerText = `${spentNear.toFixed(3)} / ${limitNear.toFixed(2)} NEAR`;
+        document.getElementById('barDailyBudget').style.width = `${pct}%`;
+        const remNear = Math.max(0, limitNear - spentNear).toFixed(3);
+        const metaEl = document.getElementById('metaDailyBudget');
+        if (metaEl) {
+          metaEl.innerText = `Remaining: ${remNear} NEAR (Live On-Chain Synced)`;
+        }
+
+        const pending = state.pending_count || 0;
+        document.getElementById('valPendingCount').innerText = `${pending} AWAITING`;
+        document.getElementById('valPendingCount').style.color = pending > 0 ? 'var(--accent-amber)' : 'var(--text-muted)';
+
+        if (state.is_paused) {
+          document.getElementById('pauseStatus').innerText = 'PAUSED ON-CHAIN';
+          document.getElementById('pauseStatus').style.color = 'var(--accent-red)';
+        }
+
+        log(`[LIVE RPC] Synced: Spent ${spentNear.toFixed(3)} NEAR / Limit ${limitNear.toFixed(2)} NEAR, Pending: ${pending}`);
+      }
+    } catch (err) {
+      console.warn("Live sync error:", err);
+    }
+  }
+
+  // Trigger live sync on page load and every 10 seconds
+  window.addEventListener('DOMContentLoaded', () => {
+    refreshLiveOnChainState();
+    setInterval(refreshLiveOnChainState, 10000);
+  });
 
   function log(msg, type = '') {
     const box = document.getElementById('consoleLog');
