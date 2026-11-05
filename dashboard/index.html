@@ -775,7 +775,7 @@
   let currentProposalId = null;
   let blockedCount = 14;
 
-  const API_BASE = (window.location.port === "8095" || window.location.port === "8096" || window.location.port === "8097") ? "" : "http://127.0.0.1:8096";
+  const API_BASE = window.location.protocol === "file:" ? "http://127.0.0.1:8096" : "";
 
   function toggleEmergencyPause() {
     isPaused = !isPaused;
