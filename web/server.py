@@ -18,6 +18,16 @@ from agent.service_agent import UntrustedCareAgent
 from near_rail.client import NearRailClient
 
 RULES_PATH = os.path.join(ROOT_DIR, "policy", "rules.json")
+ENV_FILE = os.path.join(ROOT_DIR, ".env")
+def get_env_account_id():
+    if os.path.exists(ENV_FILE):
+        with open(ENV_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("CARERAIL_TESTNET_ACCOUNT_ID="):
+                    return line.split("=", 1)[1].strip()
+    return "carerail-vault.testnet"
+
+SENDER_ACCOUNT_ID = get_env_account_id()
 policy_rules = PolicyRules.load_from_json(RULES_PATH)
 engine = CareRailEngine(policy_rules)
 agent = UntrustedCareAgent()
@@ -109,11 +119,11 @@ class CareRailServerHandler(SimpleHTTPRequestHandler):
             # If instantly approved, execute settlement
             if state == ProposalState.APPROVED:
                 tx_res = near_client.submit_settlement(
-                    sender_account="carerail-vault.testnet",
+                    sender_account=SENDER_ACCOUNT_ID,
                     recipient_account=prop.recipient,
                     amount_near=prop.amount_near,
                     proposal_hash=prop.compute_hash(),
-                    dry_run=True,
+                    dry_run=False,
                 )
                 engine.commit_spend(prop.proposal_id, tx_res.get("transaction_hash", ""))
                 result["tx"] = tx_res
@@ -131,11 +141,11 @@ class CareRailServerHandler(SimpleHTTPRequestHandler):
 
             prop = engine.proposals[proposal_id]
             tx_res = near_client.submit_settlement(
-                sender_account="carerail-vault.testnet",
+                sender_account=SENDER_ACCOUNT_ID,
                 recipient_account=prop.recipient,
                 amount_near=prop.amount_near,
                 proposal_hash=prop.compute_hash(),
-                dry_run=True,
+                dry_run=False,
             )
             engine.commit_spend(proposal_id, tx_res.get("transaction_hash", ""))
             self._send_json({"success": True, "state": "CONFIRMED", "tx": tx_res})

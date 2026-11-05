@@ -1,0 +1,17 @@
+{
+  "name": "carerail-policy-vault",
+  "version": "1.0.0",
+  "description": "Deterministic On-Chain Policy Vault Contract for AI Agents on NEAR",
+  "main": "src/index.js",
+  "scripts": {
+    "build": "near-sdk-js build src/index.js build/policy_vault.wasm",
+    "test": "node test/test_vault.js"
+  },
+  "dependencies": {
+    "near-sdk-js": "^2.0.0"
+  },
+  "devDependencies": {
+    "near-api-js": "^4.0.0"
+  },
+  "license": "MIT"
+}

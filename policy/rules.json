@@ -2,6 +2,7 @@
   "version": "1.0.0",
   "policy_id": "policy_care_standard_v1",
   "allowed_recipients": [
+    "testnet",
     "care-provider.testnet",
     "physio-clinic.testnet",
     "compute-vendor.testnet",

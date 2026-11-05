@@ -26,8 +26,8 @@ class UntrustedCareAgent:
         return PaymentProposal(
             proposal_id=f"prop-{uuid.uuid4().hex[:8]}",
             agent_id=self.agent_id,
-            recipient="care-provider.testnet",
-            amount_near=1.2,
+            recipient="testnet",
+            amount_near=0.05,
             intent_memo="Booking 45-min pain management physiotherapy session",
             nonce=self._next_nonce(),
             created_at=time.time(),
@@ -52,8 +52,8 @@ class UntrustedCareAgent:
         return PaymentProposal(
             proposal_id=f"prop-{uuid.uuid4().hex[:8]}",
             agent_id=self.agent_id,
-            recipient="physio-clinic.testnet",
-            amount_near=3.8,  # Above the 2.0 NEAR owner threshold
+            recipient="testnet",
+            amount_near=2.5,  # Above the 2.0 NEAR owner threshold
             intent_memo="Procurement of lumbar decompression traction belt",
             nonce=self._next_nonce(),
             created_at=time.time(),

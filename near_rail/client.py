@@ -4,6 +4,7 @@ Interacts with the NEAR Testnet via standard JSON-RPC 2.0.
 
 import json
 import logging
+import os
 import urllib.request
 import urllib.error
 from typing import Dict, Any, Optional
@@ -59,11 +60,11 @@ class NearRailClient:
         recipient_account: str,
         amount_near: float,
         proposal_hash: str,
-        dry_run: bool = True,
+        dry_run: bool = False,
     ) -> Dict[str, Any]:
         """Executes the settlement on NEAR.
-        When dry_run=True (default during local test/demo without live keys), returns a deterministic simulated hash.
-        When live credentials exist, signs and broadcasts via NEAR RPC.
+        When dry_run=False (default), signs and broadcasts real on-chain transaction via send_tx.js.
+        When dry_run=True, returns simulated hash.
         """
         if dry_run:
             simulated_hash = f"NEAR-TX-{proposal_hash[:16].upper()}-TESTNET"
@@ -78,5 +79,27 @@ class NearRailClient:
                 "mode": "deterministic_simulation",
             }
 
-        # Live transaction broadcast logic can be plugged here
-        return {"success": False, "error": "Live signing credentials not loaded in environment"}
+        # Real Live On-Chain Broadcast via isolated Node signer
+        import subprocess
+        script_path = os.path.join(os.path.dirname(__file__), "send_tx.js")
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        try:
+            res = subprocess.run(
+                ["node", script_path, recipient_account, str(amount_near)],
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+                timeout=25,
+            )
+            if res.returncode == 0:
+                data = json.loads(res.stdout.strip())
+                data["mode"] = "live_onchain"
+                return data
+            else:
+                try:
+                    err_json = json.loads(res.stderr.strip() or res.stdout.strip())
+                    return {"success": False, "error": err_json.get("error", "Transaction failed")}
+                except Exception:
+                    return {"success": False, "error": res.stderr.strip() or res.stdout.strip()}
+        except Exception as e:
+            return {"success": False, "error": f"Execution error: {str(e)}"}
