@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { KeyPair, KeyPairSigner, JsonRpcProvider, Account, parseNearAmount, actions } = require('near-api-js');
+const { KeyPair, KeyPairSigner, Account, parseNearAmount, actions } = require('near-api-js');
+const { FailoverJsonRpcProvider } = require('./rpc_provider');
 
 // 1. Read .env file safely - Key Isolation Invariant
 const envPath = path.resolve(__dirname, '..', '.env');
@@ -40,7 +41,7 @@ async function runHumanInTheLoopTest() {
   console.log(" Target Vault Contract:", accountId);
   console.log("===============================================================================\n");
 
-  const provider = new JsonRpcProvider({ url: 'https://test.rpc.fastnear.com' });
+  const provider = new FailoverJsonRpcProvider();
   const ownerSigner = new KeyPairSigner(KeyPair.fromString(ownerPrivKey));
   const ownerAccount = new Account(accountId, provider, ownerSigner);
 

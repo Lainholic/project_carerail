@@ -89,6 +89,12 @@ def main():
         [sys.executable, "-m", "unittest", "test_adversarial_stress.py"]
     ))
 
+    # 10. NEAR Intents Cross-Chain Pre-Flight Firewall Adapter
+    results.append(run_step(
+        "10. NEAR Intents Cross-Chain Pre-Flight Firewall Adapter (Python)",
+        [sys.executable, "-m", "unittest", "near_rail/test_intents_adapter.py"]
+    ))
+
     print("=" * 70)
     passed = sum(1 for r in results if r)
     total = len(results)

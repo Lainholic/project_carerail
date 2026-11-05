@@ -11,12 +11,21 @@ from typing import Dict, Any, Optional
 
 logger = logging.getLogger("NearRailClient")
 
-TESTNET_RPC_URL = "https://test.rpc.fastnear.com"
+DEFAULT_TESTNET_RPCS = [
+    "https://test.rpc.fastnear.com",
+    "https://rpc.testnet.near.org",
+    "https://testnet.neardata.xyz/v1/node",
+]
 
 
 class NearRailClient:
-    def __init__(self, rpc_url: str = TESTNET_RPC_URL, timeout_seconds: int = 10):
-        self.rpc_url = rpc_url
+    def __init__(self, rpc_urls: Optional[list] = None, timeout_seconds: int = 10):
+        if rpc_urls is None:
+            self.rpc_urls = list(DEFAULT_TESTNET_RPCS)
+        elif isinstance(rpc_urls, str):
+            self.rpc_urls = [rpc_urls]
+        else:
+            self.rpc_urls = list(rpc_urls)
         self.timeout = timeout_seconds
 
     def _rpc_call(self, method: str, params: Any) -> Dict[str, Any]:
@@ -27,19 +36,26 @@ class NearRailClient:
             "params": params,
         }
         data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            self.rpc_url,
-            data=data,
-            headers={"Content-Type": "application/json", "User-Agent": "CareRail/1.0"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                res_body = json.loads(resp.read().decode("utf-8"))
-                if "error" in res_body:
-                    return {"success": False, "error": res_body["error"]}
-                return {"success": True, "result": res_body.get("result")}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        last_error = None
+
+        for endpoint in self.rpc_urls:
+            req = urllib.request.Request(
+                endpoint,
+                data=data,
+                headers={"Content-Type": "application/json", "User-Agent": "CareRail/1.0"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    res_body = json.loads(resp.read().decode("utf-8"))
+                    if "error" in res_body:
+                        return {"success": False, "error": res_body["error"]}
+                    return {"success": True, "result": res_body.get("result"), "endpoint": endpoint}
+            except Exception as e:
+                last_error = f"{endpoint}: {str(e)}"
+                logger.warning(f"RPC call to {endpoint} failed ({e}), attempting failover...")
+                continue
+
+        return {"success": False, "error": f"All RPC endpoints failed. Last error: {last_error}"}
 
     def get_network_status(self) -> Dict[str, Any]:
         """Queries NEAR testnet status to verify RPC connectivity."""

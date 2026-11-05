@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
-const { KeyPair, KeyPairSigner, JsonRpcProvider, Account, parseNearAmount, actions } = require('near-api-js');
+const { KeyPair, KeyPairSigner, Account, parseNearAmount, actions } = require('near-api-js');
+const { FailoverJsonRpcProvider } = require('./rpc_provider');
 
 // 1. Read .env file safely - Key Isolation Invariant
 const envPath = path.resolve(__dirname, '..', '.env');
@@ -32,7 +33,7 @@ async function runSecurityAudit() {
   console.log(" Restricted Agent PubKey:", agentPubKey);
   console.log("===============================================================================\n");
 
-  const provider = new JsonRpcProvider({ url: 'https://test.rpc.fastnear.com' });
+  const provider = new FailoverJsonRpcProvider();
 
   // Setup accounts
   const ownerSigner = new KeyPairSigner(KeyPair.fromString(ownerPrivKey));
