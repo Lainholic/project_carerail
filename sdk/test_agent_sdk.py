@@ -98,6 +98,50 @@ class TestCareRailPaymentTool(unittest.TestCase):
         self.assertIn("TRANSACTION_HELD", res["feedback_for_llm"])
         self.assertEqual(res["reserved_amount"], 3.0)
 
+    def test_terra_p0_unverified_dispatcher_hash_rejected_by_verifier(self):
+        """Terra Round 6 P0-1: Dispatcher returned hash must be cross-verified by NearReconciliationVerifier."""
+        class MockFailingVerifier:
+            def verify_and_reconcile(self, **kwargs):
+                return False, "TARGET_CONTRACT_MISMATCH"
+
+        tool = CareRailPaymentTool(
+            self.engine,
+            agent_id="test-llm",
+            onchain_dispatcher=lambda r, a, m: (True, "fake-hash-1234"),
+            verifier=MockFailingVerifier(),
+            simulation_mode=False
+        )
+        init_budget = self.engine.get_remaining_daily_budget()
+        res = tool.execute(
+            recipient="care-provider.testnet",
+            amount_near=0.05,
+            intent_memo="Testing unverified hash"
+        )
+        self.assertFalse(res["success"])
+        self.assertEqual(res["state"], "RECONCILIATION_FAILED")
+        self.assertIn("TARGET_CONTRACT_MISMATCH", res["reason"])
+        # Invariant: Budget reservation must be released
+        self.assertEqual(self.engine.get_remaining_daily_budget(), init_budget)
+
+    def test_terra_p1_dispatch_failure_rolls_back_reservation(self):
+        """Terra Round 6 P1-5: If on-chain broadcast fails, reserved funds must be rolled back."""
+        tool = CareRailPaymentTool(
+            self.engine,
+            agent_id="test-llm",
+            onchain_dispatcher=lambda r, a, m: (False, "RPC Network Timeout"),
+            simulation_mode=False
+        )
+        init_budget = self.engine.get_remaining_daily_budget()
+        res = tool.execute(
+            recipient="care-provider.testnet",
+            amount_near=0.05,
+            intent_memo="Payment with failing RPC"
+        )
+        self.assertFalse(res["success"])
+        self.assertEqual(res["state"], "DISPATCH_FAILED")
+        # Invariant: Budget reservation must be rolled back
+        self.assertEqual(self.engine.get_remaining_daily_budget(), init_budget)
+
 
 if __name__ == "__main__":
     unittest.main()

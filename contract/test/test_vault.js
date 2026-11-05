@@ -201,6 +201,13 @@ class PolicyVaultTestable {
 
     this._checkAndResetDailyAllowance();
     const amt = BigInt(proposal.amount);
+
+    if (!this.allowed_recipients.includes(proposal.recipient)) {
+      throw new Error(`RECIPIENT_REVOKED: Recipient ${proposal.recipient} is no longer whitelisted`);
+    }
+    if (amt > this.max_per_transfer) {
+      throw new Error(`LIMIT_EXCEEDED: Proposal amount (${amt}) exceeds current max_per_transfer (${this.max_per_transfer})`);
+    }
     if (this.spent_today + amt > this.max_daily_total) throw new Error("Daily budget would be exceeded");
 
     if (owner_public_key && signature_b58) {
@@ -565,13 +572,13 @@ async function runTests() {
   });
   assert.ok(vault.pending_timelock_update !== null);
 
-  // Instant emergency reduction down to 2 NEAR -> Applied immediately, cancelling pending queue!
+  // Instant emergency reduction down to 3 NEAR -> Applied immediately, cancelling pending queue!
   const redRes = vault.request_limit_update({
-    new_max_per_transfer: "2000000000000000000000000",
-    new_max_daily_total: "4000000000000000000000000"
+    new_max_per_transfer: "3000000000000000000000000",
+    new_max_daily_total: "6000000000000000000000000"
   });
   assert.strictEqual(redRes.status, "AppliedImmediately");
-  assert.strictEqual(vault.max_per_transfer, BigInt("2000000000000000000000000"));
+  assert.strictEqual(vault.max_per_transfer, BigInt("3000000000000000000000000"));
   assert.strictEqual(vault.pending_timelock_update, null);
   console.log("[PASS] Test 17: Defensive Instant Limit Reduction & Cancellation Verified (Annie Verified)");
 
@@ -586,7 +593,35 @@ async function runTests() {
   assert.ok(vault.pending_timelock_update !== null);
   console.log("[PASS] Test 18: Owner Threshold Elevation Protected by 24h Timelock (Terra Round 5 Fixed)");
 
-  console.log("\n>>> ALL 18 CONTRACT INVARIANT TESTS PASSED (100%) <<<");
+  // 19. [Terra Round 6 Fix] Owner Approve Must Re-validate Max Per Transfer Against Current Limits
+  // Agent creates proposal for 2.5 NEAR (valid under current 3.0 NEAR cap, held for owner approval > 2.0 NEAR)
+  global.near._caller = "agent-01.testnet";
+  const heldProp = vault.propose_payment({
+    recipient: "care-clinic.testnet",
+    amount: "2500000000000000000000000", // 2.5 NEAR
+    memo: "Specialist surgery"
+  });
+  assert.strictEqual(heldProp.state, "AWAITING_OWNER_APPROVAL");
+
+  // Owner lowers max_per_transfer to 1.0 NEAR defensively
+  global.near._caller = "human-owner.testnet";
+  vault.request_limit_update({
+    new_max_per_transfer: "1000000000000000000000000", // 1.0 NEAR
+    new_max_daily_total: "4000000000000000000000000"
+  });
+  assert.strictEqual(vault.max_per_transfer, BigInt("1000000000000000000000000"));
+
+  // Now owner attempts to approve the 2.5 NEAR proposal -> MUST BE REJECTED because it exceeds CURRENT limit!
+  let approveBlocked = false;
+  try {
+    vault.owner_approve({ proposal_id: heldProp.proposal_id });
+  } catch (err) {
+    approveBlocked = err.message.includes("LIMIT_EXCEEDED");
+  }
+  assert.ok(approveBlocked, "Approval of proposal exceeding newly reduced per-transfer cap MUST FAIL");
+  console.log("[PASS] Test 19: Owner Approve Re-validates Against Current Reduced Limits (Terra Round 6 Fixed)");
+
+  console.log("\n>>> ALL 19 CONTRACT INVARIANT TESTS PASSED (100%) <<<");
 }
 
 runTests().catch(err => {

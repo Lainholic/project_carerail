@@ -69,6 +69,7 @@ class NearReconciliationVerifier:
         contract_id: str,
         expected_recipient: str,
         expected_amount_near: Decimal,
+        expected_proposal_id: Optional[str] = None,
         allow_mock: bool = False
     ) -> Tuple[bool, str]:
         """High-level verification gate.
@@ -76,6 +77,7 @@ class NearReconciliationVerifier:
         1. On-chain finality status is Success
         2. Receiver of transaction was CareRail PolicyVault contract
         3. Transaction args exactly match expected recipient and expected amount (Terra P1 Fixed)
+        4. Execution return value confirms SUBMITTED state (funds dispatched), not AWAITING_OWNER_APPROVAL (Terra Round 6 P1-1 Fixed)
         """
         if allow_mock and (tx_hash.startswith("mock-") or tx_hash.startswith("sim-")):
             return True, "MOCK_VERIFIED_SUCCESS"
@@ -124,5 +126,30 @@ class NearReconciliationVerifier:
 
         if not verified_call:
             return False, "NO_MATCHING_PROPOSE_PAYMENT_ACTION_FOUND"
+
+        # 4. Verify execution return value (Must be SUBMITTED, not held in AWAITING_OWNER_APPROVAL) (Terra Round 6 P1-1 Fixed)
+        final_status = res.get("status", {})
+        success_val_b64 = final_status.get("SuccessValue")
+        if not success_val_b64:
+            tx_outcome = res.get("transaction_outcome", {}).get("outcome", {})
+            success_val_b64 = tx_outcome.get("status", {}).get("SuccessValue")
+
+        if success_val_b64:
+            try:
+                decoded = base64.b64decode(success_val_b64).decode("utf-8")
+                ret_json = json.loads(decoded)
+                if isinstance(ret_json, dict):
+                    prop_state = ret_json.get("state")
+                    if prop_state == "AWAITING_OWNER_APPROVAL":
+                        return False, "PAYMENT_NOT_SETTLED_YET: Proposal held in AWAITING_OWNER_APPROVAL state"
+                    if prop_state and prop_state != "SUBMITTED":
+                        return False, f"UNEXPECTED_PROPOSAL_STATE: Proposal is in '{prop_state}', not SUBMITTED"
+                    if expected_proposal_id and ret_json.get("proposal_id") and ret_json.get("proposal_id") != expected_proposal_id:
+                        return False, f"PROPOSAL_ID_MISMATCH: Expected {expected_proposal_id}, got {ret_json.get('proposal_id')}"
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                # Void or non-JSON return values permitted if actions/receipts passed
+                pass
+            except Exception as ret_err:
+                return False, f"RETURN_VALUE_DECODING_ERROR: {str(ret_err)}"
 
         return True, "ONCHAIN_RECONCILIATION_VERIFIED"

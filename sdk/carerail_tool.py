@@ -11,6 +11,7 @@ import time
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 from policy.engine import CareRailEngine, PaymentProposal, PolicyRules, ProposalState, _to_decimal
+from policy.reconciliation import NearReconciliationVerifier
 
 
 class CareRailPaymentTool:
@@ -29,11 +30,15 @@ class CareRailPaymentTool:
         engine: CareRailEngine,
         agent_id: str = "autonomous-agent-01",
         onchain_dispatcher: Optional[Callable[[str, Union[Decimal, float], str], Tuple[bool, str]]] = None,
+        verifier: Optional[NearReconciliationVerifier] = None,
+        contract_id: str = "carerail-274071e4.testnet",
         simulation_mode: bool = False
     ):
         self.engine = engine
         self.agent_id = agent_id
         self.onchain_dispatcher = onchain_dispatcher
+        self.verifier = verifier
+        self.contract_id = contract_id
         self.simulation_mode = simulation_mode
         self._nonce_counter = int(time.time() * 1000)
 
@@ -120,6 +125,7 @@ class CareRailPaymentTool:
                 # Execute real on-chain transaction
                 dispatch_ok, dispatch_result = self.onchain_dispatcher(recipient, float(proposal.amount_near), intent_memo)
                 if not dispatch_ok:
+                    self.engine.release_reservation(proposal_id, reason=f"DISPATCH_FAILED: {dispatch_result}")
                     return {
                         "success": False,
                         "state": "DISPATCH_FAILED",
@@ -128,11 +134,33 @@ class CareRailPaymentTool:
                         "feedback_for_llm": f"PAYMENT_FAILED: On-chain transaction execution failed: {dispatch_result}."
                     }
                 real_tx_hash = dispatch_result
+
+                # Cross-verify with NearReconciliationVerifier before claiming SETTLED (Terra Round 6 P0-1 Fixed)
+                if self.verifier and not self.simulation_mode:
+                    rec_ok, rec_msg = self.verifier.verify_and_reconcile(
+                        tx_hash=real_tx_hash,
+                        sender_id=self.agent_id,
+                        contract_id=self.contract_id,
+                        expected_recipient=recipient,
+                        expected_amount_near=proposal.amount_near,
+                        expected_proposal_id=proposal_id,
+                        allow_mock=False
+                    )
+                    if not rec_ok:
+                        self.engine.release_reservation(proposal_id, reason=f"RECONCILIATION_FAILED: {rec_msg}")
+                        return {
+                            "success": False,
+                            "state": "RECONCILIATION_FAILED",
+                            "proposal_id": proposal_id,
+                            "reason": f"ONCHAIN_SETTLEMENT_UNVERIFIED: {rec_msg}",
+                            "feedback_for_llm": f"PAYMENT_UNVERIFIED: Blockchain transaction failed settlement reconciliation ({rec_msg}). Spend reservation rolled back."
+                        }
             elif self.simulation_mode:
                 # Isolated simulation mode
                 real_tx_hash = f"sim-tx-{proposal_id}-{int(time.time())}"
             else:
                 # Production mode without dispatcher -> Strictly refuse to settle phantom payments (Terra P0 Fix)
+                self.engine.release_reservation(proposal_id, reason="DISPATCHER_MISSING")
                 return {
                     "success": False,
                     "state": "DISPATCHER_MISSING",
@@ -144,6 +172,7 @@ class CareRailPaymentTool:
             # Commit settled spend in persistent ledger
             commit_ok = self.engine.commit_spend(proposal_id, real_tx_hash)
             if not commit_ok:
+                self.engine.release_reservation(proposal_id, reason="COMMIT_FAILED")
                 return {
                     "success": False,
                     "state": "COMMIT_FAILED",

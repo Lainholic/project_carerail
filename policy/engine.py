@@ -400,3 +400,23 @@ class CareRailEngine:
         proposal.state = ProposalState.CONFIRMED
         proposal.tx_hash = tx_hash
         return True
+
+    def release_reservation(self, proposal_id: str, reason: str = "DISPATCH_FAILED") -> bool:
+        """Rolls back an unexecuted budget reservation if on-chain broadcast fails. (Terra Round 6 P1-5 Fixed)"""
+        proposal = self.proposals.get(proposal_id)
+        if not proposal:
+            return False
+
+        if proposal.state in (ProposalState.APPROVED, ProposalState.AWAITING_OWNER_APPROVAL):
+            day_key = proposal.submitted_day
+            amt_dec = _to_decimal(proposal.amount_near)
+            cur_res = self.daily_reserved_ledger.get(day_key, Decimal("0"))
+            new_res = max(Decimal("0"), cur_res - amt_dec)
+            self.daily_reserved_ledger[day_key] = new_res
+            self.storage.set_daily_reserved(day_key, new_res)
+            proposal.state = ProposalState.REJECTED
+            proposal.rejection_reason = reason
+            self.storage.save_proposal(proposal.__dict__)
+            return True
+
+        return False

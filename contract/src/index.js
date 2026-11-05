@@ -102,6 +102,10 @@ export class PolicyVault {
 
     this._checkAndResetDailyAllowance();
     const amt = BigInt(proposal.amount);
+
+    // Re-verify recipient whitelist and per-transfer limit against current live policy rules (Terra Round 6 Fixed)
+    assert(this.allowed_recipients.includes(proposal.recipient), `RECIPIENT_REVOKED: Recipient ${proposal.recipient} is no longer whitelisted`);
+    assert(amt <= this.max_per_transfer, `LIMIT_EXCEEDED: Proposal amount (${amt}) exceeds current max_per_transfer (${this.max_per_transfer})`);
     assert(this.spent_today + amt <= this.max_daily_total, "Daily budget would be exceeded");
 
     // Cryptographic attestation recording
