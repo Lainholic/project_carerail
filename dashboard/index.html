@@ -15,7 +15,7 @@
       --border-subtle: #f1f5f9;
       --text-main: #0f172a;
       --text-sub: #475569;
-      --text-muted: #94a3b8;
+      --text-muted: #64748b;
       
       /* Restrained Data Hues (1% color rule from Stripe/Fireblocks) */
       --data-green: #047857;
@@ -540,7 +540,7 @@
           CareRail Policy Engine
           <span class="badge-env">NEAR TESTNET</span>
         </h1>
-        <p>carerail-274071e4.testnet 쨌 Track [06/SEC] AI Security &amp; Defense</p>
+        <p>carerail-274071e4.testnet &middot; Track [06/SEC] AI Security &amp; Defense</p>
       </div>
     </div>
     <div class="header-actions">
@@ -564,15 +564,15 @@
       <span class="kpi-title">Daily Budget Allowance</span>
       <div class="kpi-value" id="valDailyBudget">1.85 <span style="font-size:15px; color:var(--text-muted); font-weight:500;">/ 2.00 NEAR</span></div>
       <div class="progress-bar-bg">
-        <div class="progress-bar-fill" id="barDailyBudget" style="width: 92.5%;"></div>
+        <div class="progress-bar-fill" id="barDailyBudget" style="width: 92.5%; background: var(--data-amber);"></div>
       </div>
       <span class="kpi-sub" id="metaDailyBudget">Remaining: 0.15 NEAR (Resets 00:00 UTC)</span>
     </div>
 
     <div class="kpi-card">
       <span class="kpi-title">Fail-Closed Boundaries</span>
-      <div class="kpi-value">0.50 <span style="font-size:15px; color:var(--text-muted); font-weight:500;">/ 0.10 NEAR</span></div>
-      <span class="kpi-sub">Per-Tx Cap: 0.50 N 쨌 Human Gate &gt; 0.10 N</span>
+      <div class="kpi-value" id="valBoundaries" style="font-size:19px; letter-spacing:-0.2px;">0.50 N <span style="font-size:13px; color:var(--text-muted); font-weight:500;">(Single)</span> &middot; 0.10 N <span style="font-size:13px; color:var(--text-muted); font-weight:500;">(Gate)</span></div>
+      <span class="kpi-sub">Per-Tx Cap: 0.50 N &middot; Human Gate &gt; 0.10 N</span>
     </div>
 
     <div class="kpi-card">
@@ -583,8 +583,8 @@
 
     <div class="kpi-card">
       <span class="kpi-title">Merkle Audit Anchor</span>
-      <div class="kpi-value" style="font-size:18px; font-family:var(--font-mono);">0x92f8...41ba</div>
-      <span class="kpi-sub">RFC 6962 SHA-256 쨌 120 RPM Active</span>
+      <div class="kpi-value" id="valMerkleRoot" style="font-size:18px; font-family:var(--font-mono);">0x92f8...41ba</div>
+      <span class="kpi-sub">RFC 6962 SHA-256 &middot; 120 RPM Active</span>
     </div>
   </div>
 
@@ -987,8 +987,37 @@
     }
   }
 
+  async function loadLiveStatus() {
+    try {
+      const res = await fetch(`${API_BASE}/api/status`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.rules) {
+        const spent = Number(data.rules.today_spent_near || 1.85);
+        const maxDaily = Number(data.rules.max_daily_total_near || 2.0);
+        const pct = Math.min(100, Math.round((spent / maxDaily) * 100));
+        const rem = Math.max(0, maxDaily - spent);
+
+        document.getElementById('valDailyBudget').innerHTML = `${spent.toFixed(2)} <span style="font-size:15px; color:var(--text-muted); font-weight:500;">/ ${maxDaily.toFixed(2)} NEAR</span>`;
+        const bar = document.getElementById('barDailyBudget');
+        bar.style.width = `${pct}%`;
+        bar.style.background = pct >= 80 ? 'var(--data-amber)' : 'var(--text-main)';
+        document.getElementById('metaDailyBudget').innerText = `Remaining: ${rem.toFixed(2)} NEAR (Resets 00:00 UTC)`;
+        
+        if (data.rules.max_per_transfer_near && data.rules.owner_approval_threshold_near) {
+          document.getElementById('valBoundaries').innerHTML = `${data.rules.max_per_transfer_near} N <span style="font-size:13px; color:var(--text-muted); font-weight:500;">(Single)</span> &middot; ${data.rules.owner_approval_threshold_near} N <span style="font-size:13px; color:var(--text-muted); font-weight:500;">(Gate)</span>`;
+        }
+      }
+    } catch (e) {
+      // Keep static defaults if offline
+    }
+  }
+
   // Pre-wire existing rows for inspection
   document.addEventListener('DOMContentLoaded', () => {
+    loadLiveStatus();
+    setInterval(loadLiveStatus, 5000);
+
     const row22 = document.getElementById('row-prop-22');
     if (row22) {
       row22.onclick = (e) => {
