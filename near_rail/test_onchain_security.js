@@ -135,10 +135,10 @@ async function runSecurityAudit() {
 
   // TEST 4: Valid Proposal through Restricted Agent Key
   total++;
-  console.log(`\n[TEST 4] Legitimate Operation: Agent proposes valid payment to whitelisted 'aws.testnet' (0.02 NEAR)`);
+  console.log(`\n[TEST 4] Legitimate Operation: Agent proposes valid payment to whitelisted 'aws.testnet' (0.0015 NEAR)`);
   try {
     const gasLimit = BigInt("30000000000000");
-    const yocto = parseNearAmount("0.02");
+    const yocto = parseNearAmount("0.0015");
     const result = await agentAccount.signAndSendTransaction({
       receiverId: accountId,
       actions: [actions.functionCall('propose_payment', {

@@ -34,12 +34,13 @@ class TestNearReconciliationVerifier(unittest.TestCase):
             "amount": str(int(Decimal("0.1") * YOCTO_PER_NEAR))
         }).encode("utf-8")
         args_b64 = base64.b64encode(args_payload).decode("utf-8")
+        ret_val_b64 = base64.b64encode(json.dumps({"proposal_id": "prop-1", "state": "SUBMITTED"}).encode("utf-8")).decode("utf-8")
 
         mock_response = MagicMock()
         mock_response.read.return_value = json.dumps({
             "jsonrpc": "2.0",
             "result": {
-                "status": {"SuccessValue": "AAAA"},
+                "status": {"SuccessValue": ret_val_b64},
                 "transaction": {
                     "receiver_id": "carerail-274071e4.testnet",
                     "actions": [{

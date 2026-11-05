@@ -45,10 +45,15 @@ class TestCareRailPaymentTool(unittest.TestCase):
             dispatcher_called.append((recipient, amount, memo))
             return True, mock_receipt_hash
 
+        class MockSuccessVerifier:
+            def verify_and_reconcile(self, **kwargs):
+                return True, "ONCHAIN_RECONCILIATION_VERIFIED"
+
         live_tool = CareRailPaymentTool(
             self.engine,
             agent_id="live-llm",
             onchain_dispatcher=live_dispatcher,
+            verifier=MockSuccessVerifier(),
             simulation_mode=False
         )
 

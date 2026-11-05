@@ -338,8 +338,8 @@ class TestCareRailEngine(unittest.TestCase):
 
         # Re-evaluate the identical object reference
         state, reason = self.engine.evaluate_proposal(p)
-        # Must return duplicate rejection while preserving CONFIRMED state on original
-        self.assertEqual(state, ProposalState.CONFIRMED)
+        # Must return duplicate rejection while preserving CONFIRMED state on original object
+        self.assertEqual(state, ProposalState.REJECTED)
         self.assertEqual(p.state, ProposalState.CONFIRMED)
         self.assertIn("DUPLICATE_PROPOSAL_ID", reason)
 

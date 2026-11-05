@@ -203,7 +203,10 @@ class CareRailEngine:
         # Invariant P0-B: Check duplicate BEFORE mutating any state on the passed proposal object
         if proposal.proposal_id in self.proposals:
             existing = self.proposals[proposal.proposal_id]
-            return existing.state, f"DUPLICATE_PROPOSAL_ID: Proposal ID {proposal.proposal_id} already exists in state {existing.state}"
+            if proposal is not existing:
+                proposal.state = ProposalState.REJECTED
+                proposal.rejection_reason = f"DUPLICATE_PROPOSAL_ID: Proposal ID {proposal.proposal_id} already exists in state {existing.state}"
+            return ProposalState.REJECTED, f"DUPLICATE_PROPOSAL_ID: Proposal ID {proposal.proposal_id} already exists in state {existing.state}"
 
         # Invariant: Persistent storage duplicate check
         if self.storage.get_proposal(proposal.proposal_id):

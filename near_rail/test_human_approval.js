@@ -49,9 +49,9 @@ async function runHumanInTheLoopTest() {
 
   const gasLimit = BigInt("30000000000000");
 
-  // 1. Agent proposes high-value payment (0.12 NEAR > 0.1 NEAR threshold)
-  console.log("[Step 1] Agent proposes 0.12 NEAR to whitelisted 'hotel.testnet' (> 0.1 NEAR threshold)...");
-  const yocto = parseNearAmount("0.12");
+  // 1. Agent proposes high-value payment (0.003 NEAR > 0.002 NEAR threshold)
+  console.log("[Step 1] Agent proposes 0.003 NEAR to whitelisted 'hotel.testnet' (> 0.002 NEAR threshold)...");
+  const yocto = parseNearAmount("0.003");
   
   const proposeResult = await agentAccount.signAndSendTransaction({
     receiverId: accountId,

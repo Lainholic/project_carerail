@@ -86,10 +86,10 @@ class NearReconciliationVerifier:
         if not success:
             return False, f"RECONCILIATION_FAILED: {msg}"
 
-        # 1. Verify transaction receiver was the PolicyVault contract
+        # 1. Verify transaction receiver was the PolicyVault contract (Terra Round 7 P1-2 Fixed)
         tx_info = res.get("transaction", {})
         actual_receiver = tx_info.get("receiver_id")
-        if actual_receiver and actual_receiver != contract_id:
+        if not actual_receiver or actual_receiver != contract_id:
             return False, f"TARGET_CONTRACT_MISMATCH: Expected {contract_id}, but on-chain receiver was {actual_receiver}"
 
         # 2. Check receipts outcome for cross-contract execution failures
@@ -127,29 +127,31 @@ class NearReconciliationVerifier:
         if not verified_call:
             return False, "NO_MATCHING_PROPOSE_PAYMENT_ACTION_FOUND"
 
-        # 4. Verify execution return value (Must be SUBMITTED, not held in AWAITING_OWNER_APPROVAL) (Terra Round 6 P1-1 Fixed)
+        # 4. Verify execution return value (Strict Fail-Closed check for SUBMITTED) (Terra Round 7 P1-1 Fixed)
         final_status = res.get("status", {})
         success_val_b64 = final_status.get("SuccessValue")
         if not success_val_b64:
             tx_outcome = res.get("transaction_outcome", {}).get("outcome", {})
             success_val_b64 = tx_outcome.get("status", {}).get("SuccessValue")
 
-        if success_val_b64:
-            try:
-                decoded = base64.b64decode(success_val_b64).decode("utf-8")
-                ret_json = json.loads(decoded)
-                if isinstance(ret_json, dict):
-                    prop_state = ret_json.get("state")
-                    if prop_state == "AWAITING_OWNER_APPROVAL":
-                        return False, "PAYMENT_NOT_SETTLED_YET: Proposal held in AWAITING_OWNER_APPROVAL state"
-                    if prop_state and prop_state != "SUBMITTED":
-                        return False, f"UNEXPECTED_PROPOSAL_STATE: Proposal is in '{prop_state}', not SUBMITTED"
-                    if expected_proposal_id and ret_json.get("proposal_id") and ret_json.get("proposal_id") != expected_proposal_id:
-                        return False, f"PROPOSAL_ID_MISMATCH: Expected {expected_proposal_id}, got {ret_json.get('proposal_id')}"
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                # Void or non-JSON return values permitted if actions/receipts passed
-                pass
-            except Exception as ret_err:
-                return False, f"RETURN_VALUE_DECODING_ERROR: {str(ret_err)}"
+        if not success_val_b64:
+            return False, "MISSING_SUCCESS_VALUE: Transaction outcome did not produce a valid SuccessValue"
+
+        try:
+            decoded = base64.b64decode(success_val_b64).decode("utf-8")
+            ret_json = json.loads(decoded)
+            if not isinstance(ret_json, dict):
+                return False, "INVALID_RETURN_VALUE: Expected JSON object return from contract"
+            prop_state = ret_json.get("state")
+            if not prop_state:
+                return False, "INCOMPLETE_RETURN_VALUE: Proposal state is missing in return payload"
+            if prop_state == "AWAITING_OWNER_APPROVAL":
+                return False, "PAYMENT_NOT_SETTLED_YET: Proposal held in AWAITING_OWNER_APPROVAL state"
+            if prop_state != "SUBMITTED":
+                return False, f"UNEXPECTED_PROPOSAL_STATE: Proposal is in '{prop_state}', not SUBMITTED"
+            if expected_proposal_id and ret_json.get("proposal_id") and ret_json.get("proposal_id") != expected_proposal_id:
+                return False, f"PROPOSAL_ID_MISMATCH: Expected {expected_proposal_id}, got {ret_json.get('proposal_id')}"
+        except Exception as ret_err:
+            return False, f"RETURN_VALUE_DECODING_ERROR: {str(ret_err)}"
 
         return True, "ONCHAIN_RECONCILIATION_VERIFIED"

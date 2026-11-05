@@ -9,6 +9,7 @@ from decimal import Decimal
 import json
 import time
 from typing import Any, Callable, Dict, Optional, Tuple, Union
+import uuid
 
 from policy.engine import CareRailEngine, PaymentProposal, PolicyRules, ProposalState, _to_decimal
 from policy.reconciliation import NearReconciliationVerifier
@@ -37,7 +38,7 @@ class CareRailPaymentTool:
         self.engine = engine
         self.agent_id = agent_id
         self.onchain_dispatcher = onchain_dispatcher
-        self.verifier = verifier
+        self.verifier = verifier if verifier is not None else (NearReconciliationVerifier() if not simulation_mode else None)
         self.contract_id = contract_id
         self.simulation_mode = simulation_mode
         self._nonce_counter = int(time.time() * 1000)
@@ -79,7 +80,8 @@ class CareRailPaymentTool:
         Strict invariant: Never claims SETTLED or PAYMENT_CONFIRMED without a verified on-chain execution receipt.
         """
         nonce = self._get_next_nonce()
-        proposal_id = f"tool-prop-{nonce}"
+        unique_suffix = uuid.uuid4().hex[:8]
+        proposal_id = f"tool-prop-{nonce}-{unique_suffix}"
 
         amount_dec = _to_decimal(amount_near) if isinstance(amount_near, (int, float, str, Decimal)) else Decimal("0")
         proposal = PaymentProposal(
@@ -121,7 +123,21 @@ class CareRailPaymentTool:
         if state == ProposalState.APPROVED:
             real_tx_hash = None
 
-            if self.onchain_dispatcher:
+            if self.simulation_mode:
+                # Isolated simulation mode - NEVER touches live blockchain or dispatcher (Terra Round 7 P1-5 Fixed)
+                real_tx_hash = f"sim-tx-{proposal_id}-{int(time.time())}"
+            elif self.onchain_dispatcher:
+                # Production mode: Must have verifier to prevent phantom settlement (Terra Round 7 P0-1 Fixed)
+                if not self.verifier:
+                    self.engine.release_reservation(proposal_id, reason="VERIFIER_MISSING")
+                    return {
+                        "success": False,
+                        "state": "VERIFIER_MISSING",
+                        "proposal_id": proposal_id,
+                        "reason": "PRODUCTION_INVARIANT: Cannot settle without a live on-chain reconciliation verifier.",
+                        "feedback_for_llm": "PAYMENT_ABORTED: No reconciliation verifier configured in production mode."
+                    }
+
                 # Execute real on-chain transaction
                 dispatch_ok, dispatch_result = self.onchain_dispatcher(recipient, float(proposal.amount_near), intent_memo)
                 if not dispatch_ok:
@@ -135,29 +151,25 @@ class CareRailPaymentTool:
                     }
                 real_tx_hash = dispatch_result
 
-                # Cross-verify with NearReconciliationVerifier before claiming SETTLED (Terra Round 6 P0-1 Fixed)
-                if self.verifier and not self.simulation_mode:
-                    rec_ok, rec_msg = self.verifier.verify_and_reconcile(
-                        tx_hash=real_tx_hash,
-                        sender_id=self.agent_id,
-                        contract_id=self.contract_id,
-                        expected_recipient=recipient,
-                        expected_amount_near=proposal.amount_near,
-                        expected_proposal_id=proposal_id,
-                        allow_mock=False
-                    )
-                    if not rec_ok:
-                        self.engine.release_reservation(proposal_id, reason=f"RECONCILIATION_FAILED: {rec_msg}")
-                        return {
-                            "success": False,
-                            "state": "RECONCILIATION_FAILED",
-                            "proposal_id": proposal_id,
-                            "reason": f"ONCHAIN_SETTLEMENT_UNVERIFIED: {rec_msg}",
-                            "feedback_for_llm": f"PAYMENT_UNVERIFIED: Blockchain transaction failed settlement reconciliation ({rec_msg}). Spend reservation rolled back."
-                        }
-            elif self.simulation_mode:
-                # Isolated simulation mode
-                real_tx_hash = f"sim-tx-{proposal_id}-{int(time.time())}"
+                # Cross-verify with NearReconciliationVerifier before claiming SETTLED (Terra Round 6 & 7 P0-1 Fixed)
+                rec_ok, rec_msg = self.verifier.verify_and_reconcile(
+                    tx_hash=real_tx_hash,
+                    sender_id=self.agent_id,
+                    contract_id=self.contract_id,
+                    expected_recipient=recipient,
+                    expected_amount_near=proposal.amount_near,
+                    expected_proposal_id=proposal_id,
+                    allow_mock=False
+                )
+                if not rec_ok:
+                    self.engine.release_reservation(proposal_id, reason=f"RECONCILIATION_FAILED: {rec_msg}")
+                    return {
+                        "success": False,
+                        "state": "RECONCILIATION_FAILED",
+                        "proposal_id": proposal_id,
+                        "reason": f"ONCHAIN_SETTLEMENT_UNVERIFIED: {rec_msg}",
+                        "feedback_for_llm": f"PAYMENT_UNVERIFIED: Blockchain transaction failed settlement reconciliation ({rec_msg}). Spend reservation rolled back."
+                    }
             else:
                 # Production mode without dispatcher -> Strictly refuse to settle phantom payments (Terra P0 Fix)
                 self.engine.release_reservation(proposal_id, reason="DISPATCHER_MISSING")
