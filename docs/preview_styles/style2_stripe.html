@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>CareRail — Stripe & Mercury Clean Fintech</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --border: #e2e8f0;
+      --border-subtle: #f1f5f9;
+      --text-main: #0f172a;
+      --text-sub: #475569;
+      --text-muted: #94a3b8;
+      --primary: #4338ca;
+      --primary-hover: #3730a3;
+      --success: #059669;
+      --success-bg: #ecfdf5;
+      --danger: #dc2626;
+      --danger-bg: #fef2f2;
+      --warning: #d97706;
+      --warning-bg: #fffbeb;
+      --font: 'Plus Jakarta Sans', sans-serif;
+      --mono: 'JetBrains Mono', monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text-main);
+      font-family: var(--font);
+      line-height: 1.5;
+      padding: 36px 32px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .container {
+      max-width: 1240px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    /* Top Nav */
+    .nav {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 24px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+    }
+
+    .brand-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #4f46e5 0%, #312e81 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 800;
+      font-size: 15px;
+    }
+
+    .brand-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text-main);
+      letter-spacing: -0.3px;
+    }
+
+    .badge-env {
+      font-size: 11px;
+      font-weight: 600;
+      background: #eef2ff;
+      color: #4338ca;
+      padding: 3px 8px;
+      border-radius: 6px;
+      border: 1px solid #c7d2fe;
+    }
+
+    .nav-stats {
+      display: flex;
+      gap: 20px;
+      align-items: center;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-sub);
+    }
+
+    .stat-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: #f1f5f9;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    /* 4 Stat Cards */
+    .grid-stats {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+    }
+
+    .stat-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .stat-card-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .stat-card-val {
+      font-size: 26px;
+      font-weight: 800;
+      color: var(--text-main);
+      letter-spacing: -0.5px;
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+    }
+
+    .stat-card-sub {
+      font-size: 12px;
+      color: var(--text-sub);
+    }
+
+    /* Main Content */
+    .grid-body {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 20px;
+    }
+
+    .panel {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 22px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+    }
+
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 16px;
+      margin-bottom: 16px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .panel-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text-main);
+      letter-spacing: -0.2px;
+    }
+
+    /* Transaction Rows */
+    .txn-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .txn-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--border-subtle);
+      background: #fafbfd;
+      transition: background 0.15s ease;
+    }
+    .txn-item:hover { background: #f1f5f9; }
+
+    .txn-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .txn-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .icon-pass { background: var(--success-bg); color: var(--success); }
+    .icon-block { background: var(--danger-bg); color: var(--danger); }
+    .icon-hold { background: var(--warning-bg); color: var(--warning); }
+
+    .txn-meta-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+    .txn-meta-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-family: var(--mono);
+    }
+
+    .txn-right {
+      text-align: right;
+    }
+    .txn-amount {
+      font-size: 13px;
+      font-weight: 700;
+      font-family: var(--mono);
+      color: var(--text-main);
+    }
+    .txn-badge {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      margin-top: 2px;
+    }
+    .badge-pass { background: var(--success-bg); color: var(--success); }
+    .badge-block { background: var(--danger-bg); color: var(--danger); }
+    .badge-hold { background: var(--warning-bg); color: var(--warning); }
+
+    /* Right Action Box */
+    .action-box {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 14px;
+      background: #fafbfd;
+    }
+    .action-title {
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .action-desc {
+      font-size: 12px;
+      color: var(--text-sub);
+      line-height: 1.4;
+      margin-bottom: 12px;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid transparent;
+      font-family: var(--font);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn-primary {
+      background: var(--primary);
+      color: #fff;
+    }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-outline {
+      background: #fff;
+      border-color: var(--border);
+      color: var(--text-main);
+    }
+    .btn-outline:hover { background: #f8fafc; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <!-- Nav -->
+  <header class="nav">
+    <div class="brand-group">
+      <div class="brand-mark">CR</div>
+      <div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <h1 class="brand-title">CareRail Payment Vault</h1>
+          <span class="badge-env">NEAR TESTNET</span>
+        </div>
+        <div style="font-size:12px; color:var(--text-muted);">carerail-274071e4.testnet 쨌 Track [06/SEC]</div>
+      </div>
+    </div>
+    <div class="nav-stats">
+      <div class="stat-pill">
+        <span style="color:var(--success);">●</span>
+        <span>12/12 Invariants Pass</span>
+      </div>
+      <div class="stat-pill">
+        <span>Allowance: <strong>0.15 NEAR left</strong></span>
+      </div>
+    </div>
+  </header>
+
+  <!-- 4 Stat Cards -->
+  <div class="grid-stats">
+    <div class="stat-card">
+      <span class="stat-card-title">Daily Quota</span>
+      <div class="stat-card-val">1.85 <span style="font-size:15px; color:var(--text-muted); font-weight:500;">/ 2.00 N</span></div>
+      <span class="stat-card-sub">92.5% consumed 쨌 Resets 00:00 UTC</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-card-title">Threat Neutralization</span>
+      <div class="stat-card-val" style="color:var(--danger);">14 <span style="font-size:15px; color:var(--danger); font-weight:500;">Blocked</span></div>
+      <span class="stat-card-sub">0 on-chain leakage (100% fail-closed)</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-card-title">Autonomous Limit</span>
+      <div class="stat-card-val">0.10 <span style="font-size:15px; color:var(--text-muted); font-weight:500;">NEAR</span></div>
+      <span class="stat-card-sub">Higher transactions require NEP-413</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-card-title">Merkle Audit Root</span>
+      <div class="stat-card-val" style="font-size:18px; font-family:var(--mono); color:#4338ca;">0x92f8...41ba</div>
+      <span class="stat-card-sub">RFC 6962 SHA-256 Anchored</span>
+    </div>
+  </div>
+
+  <!-- Main Body -->
+  <div class="grid-body">
+    <!-- Left Transactions -->
+    <div class="panel">
+      <div class="panel-header">
+        <h2 class="panel-title">Real-Time Ingress &amp; Audit Trail</h2>
+        <span style="font-size:12px; color:var(--text-muted);">Synchronized with FastNEAR RPC</span>
+      </div>
+
+      <div class="txn-list">
+        <!-- Item 1 -->
+        <div class="txn-item">
+          <div class="txn-left">
+            <div class="txn-icon icon-hold">⏳</div>
+            <div>
+              <div class="txn-meta-title">hotel.testnet — Team Travel Booking</div>
+              <div class="txn-meta-sub">ID: prop-22 쨌 Exceeds 0.100 NEAR autonomy limit</div>
+            </div>
+          </div>
+          <div class="txn-right">
+            <div class="txn-amount">0.120 NEAR</div>
+            <span class="txn-badge badge-hold">Awaiting Owner Signature</span>
+          </div>
+        </div>
+
+        <!-- Item 2 -->
+        <div class="txn-item">
+          <div class="txn-left">
+            <div class="txn-icon icon-pass">✓</div>
+            <div>
+              <div class="txn-meta-title">aws.testnet — GPU Inference Voucher</div>
+              <div class="txn-meta-sub">ID: prop-21 쨌 Tx: CjnhBKzH5EA3TPTEAwR2bBTRasscS5sFeusmgk8SyhVz</div>
+            </div>
+          </div>
+          <div class="txn-right">
+            <div class="txn-amount">0.020 NEAR</div>
+            <span class="txn-badge badge-pass">Settled On-Chain</span>
+          </div>
+        </div>
+
+        <!-- Item 3 -->
+        <div class="txn-item">
+          <div class="txn-left">
+            <div class="txn-icon icon-block">✕</div>
+            <div>
+              <div class="txn-meta-title">evil-hacker.testnet — Prompt Injection Drainage</div>
+              <div class="txn-meta-sub">ID: prop-20 쨌 Blocked: Keyword "attacker" + Unregistered peer</div>
+            </div>
+          </div>
+          <div class="txn-right">
+            <div class="txn-amount" style="color:var(--text-muted);">50.000 NEAR</div>
+            <span class="txn-badge badge-block">Blocked Fail-Closed</span>
+          </div>
+        </div>
+
+        <!-- Item 4 -->
+        <div class="txn-item">
+          <div class="txn-left">
+            <div class="txn-icon icon-pass">✓</div>
+            <div>
+              <div class="txn-meta-title">uber.testnet — Autonomous Dispatch</div>
+              <div class="txn-meta-sub">ID: prop-19 쨌 On-Chain Contract Transfer Verified</div>
+            </div>
+          </div>
+          <div class="txn-right">
+            <div class="txn-amount">0.035 NEAR</div>
+            <span class="txn-badge badge-pass">Settled On-Chain</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Controls -->
+    <div class="panel">
+      <div class="panel-header">
+        <h2 class="panel-title">Interactive Audit Controls</h2>
+      </div>
+
+      <div class="action-box">
+        <div class="action-title">Adversarial Red-Team Injection</div>
+        <div class="action-desc">Dispatch simulated adversarial prompt to verify instant firewall containment.</div>
+        <button class="btn btn-outline" style="border-color:#fca5a5; color:#dc2626;">Execute Red-Team Attack</button>
+      </div>
+
+      <div class="action-box">
+        <div class="action-title">Legitimate Agent Micro-Payment</div>
+        <div class="action-desc">Dispatch compliant 0.015 NEAR inference transaction to whitelisted provider.</div>
+        <button class="btn btn-primary">Dispatch Valid Payment</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

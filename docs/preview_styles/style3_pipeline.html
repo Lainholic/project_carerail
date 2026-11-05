@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>CareRail — Visual Node Pipeline</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0b0f17;
+      --panel: #131b26;
+      --card: #182232;
+      --border: #243247;
+      --text: #f1f5f9;
+      --text-muted: #8292a8;
+      --cyan: #06b6d4;
+      --emerald: #10b981;
+      --rose: #f43f5e;
+      --amber: #f59e0b;
+      --font: 'Plus Jakarta Sans', sans-serif;
+      --mono: 'JetBrains Mono', monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      padding: 32px;
+      line-height: 1.5;
+    }
+
+    .container {
+      max-width: 1240px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 20px;
+    }
+
+    .title {
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: -0.4px;
+    }
+
+    /* Visual Pipeline Canvas */
+    .pipeline-view {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 32px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .pipeline-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .pipeline-nodes {
+      display: grid;
+      grid-template-columns: 1fr 40px 1.5fr 40px 1fr;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .node-arrow {
+      text-align: center;
+      color: var(--cyan);
+      font-size: 20px;
+      font-weight: bold;
+    }
+
+    .node-box {
+      background: var(--card);
+      border: 1.5px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .node-box.active {
+      border-color: var(--cyan);
+      box-shadow: 0 0 20px rgba(6, 182, 212, 0.15);
+    }
+
+    .node-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: var(--text-muted);
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .node-name {
+      font-size: 16px;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .gate-rules {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 4px;
+    }
+
+    .rule-item {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      background: rgba(0, 0, 0, 0.2);
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    /* Live Feed below pipeline */
+    .logs-split {
+      display: grid;
+      grid-template-columns: 1.8fr 1fr;
+      gap: 20px;
+    }
+
+    .log-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px;
+    }
+
+    .log-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      font-size: 13px;
+    }
+    .log-row:last-child { border-bottom: none; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <header>
+    <div>
+      <div class="title">CareRail Autonomous Pipeline Architecture</div>
+      <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">Visual Gate Telemetry 쨌 NEAR Testnet Contract carerail-274071e4.testnet</div>
+    </div>
+    <div style="font-family:var(--mono); font-size:12px; color:var(--emerald);">
+      ● LIVE PIPELINE VERIFIED
+    </div>
+  </header>
+
+  <!-- Interactive Visual Pipeline -->
+  <div class="pipeline-view">
+    <div class="pipeline-header">
+      <span style="font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:0.8px; color:var(--text-muted);">Architecture Flow Map</span>
+      <span style="font-size:12px; color:var(--cyan); font-family:var(--mono);">Zero Trust Fail-Closed Mesh</span>
+    </div>
+
+    <div class="pipeline-nodes">
+      <!-- Node 1: AI Agent Ingress -->
+      <div class="node-box">
+        <div class="node-title">
+          <span>SOURCE INGRESS</span>
+          <span style="color:var(--cyan); font-family:var(--mono);">100% SECURE</span>
+        </div>
+        <div class="node-name">Autonomous AI Agent</div>
+        <div style="font-size:12px; color:var(--text-muted);">
+          Generates tool-call proposals with payment memo &amp; target intent.
+        </div>
+      </div>
+
+      <div class="node-arrow">➔</div>
+
+      <!-- Node 2: CareRail Multi-Layer Firewall -->
+      <div class="node-box active">
+        <div class="node-title">
+          <span>SECURITY BARRIER</span>
+          <span style="color:var(--emerald); font-family:var(--mono);">12 INVARIANTS PASS</span>
+        </div>
+        <div class="node-name">CareRail Policy Firewall</div>
+        <div class="gate-rules">
+          <div class="rule-item"><span>Semantic Injection Gate:</span> <strong style="color:var(--emerald);">PASS (0 Leaks)</strong></div>
+          <div class="rule-item"><span>Provider Whitelist:</span> <strong style="color:var(--emerald);">ENFORCED</strong></div>
+          <div class="rule-item"><span>Per-Tx Cap (&lt;0.50 N):</span> <strong style="color:var(--emerald);">VERIFIED</strong></div>
+          <div class="rule-item"><span>Human-in-the-Loop (&gt;0.10 N):</span> <strong style="color:var(--amber);">NEP-413 GATE</strong></div>
+        </div>
+      </div>
+
+      <div class="node-arrow">➔</div>
+
+      <!-- Node 3: Settlement Vault -->
+      <div class="node-box">
+        <div class="node-title">
+          <span>ON-CHAIN EXECUTION</span>
+          <span style="color:var(--emerald); font-family:var(--mono);">FINALIZED</span>
+        </div>
+        <div class="node-name">NEAR Testnet Vault</div>
+        <div style="font-size:12px; color:var(--text-muted);">
+          Settled via FunctionCall Access Key. 120 RPM Merkle root anchored.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Live Feed -->
+  <div class="logs-split">
+    <div class="log-panel">
+      <div style="font-size:14px; font-weight:700; margin-bottom:14px;">Recent Packet Evaluations</div>
+      <div class="log-row">
+        <span><strong>#022</strong> hotel.testnet (0.120 NEAR)</span>
+        <span style="color:var(--amber); font-family:var(--mono); font-weight:700;">[HELD: HUMAN GATE]</span>
+      </div>
+      <div class="log-row">
+        <span><strong>#021</strong> aws.testnet (0.020 NEAR)</span>
+        <span style="color:var(--emerald); font-family:var(--mono); font-weight:700;">[SETTLED ON-CHAIN]</span>
+      </div>
+      <div class="log-row">
+        <span><strong>#020</strong> evil-hacker.testnet (50.0 NEAR)</span>
+        <span style="color:var(--rose); font-family:var(--mono); font-weight:700;">[FAIL-CLOSED: BLOCKED]</span>
+      </div>
+    </div>
+
+    <div class="log-panel">
+      <div style="font-size:14px; font-weight:700; margin-bottom:14px;">Sandbox Controls</div>
+      <div style="display:flex; flex-direction:column; gap:10px;">
+        <button style="padding:10px; background:#e11d48; color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer;">Simulate Hostile Injection</button>
+        <button style="padding:10px; background:#0284c7; color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer;">Simulate Compliant Micropayment</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
