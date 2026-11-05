@@ -42,6 +42,39 @@ async function runSecurityAudit() {
   const agentSigner = new KeyPairSigner(KeyPair.fromString(agentPrivKey));
   const agentAccount = new Account(accountId, provider, agentSigner);
 
+  // Pre-flight: Auto-replenish agent access key gas allowance if exhausted
+  try {
+    const accessKeys = await provider.query({
+      request_type: 'view_access_key_list',
+      finality: 'final',
+      account_id: accountId
+    });
+    const agentKeyInfo = accessKeys.keys.find(k => k.public_key === agentPubKey);
+    if (agentKeyInfo && agentKeyInfo.access_key && agentKeyInfo.access_key.permission && agentKeyInfo.access_key.permission.FunctionCall) {
+      const curAllowance = BigInt(agentKeyInfo.access_key.permission.FunctionCall.allowance || "0");
+      const minRequired = BigInt(parseNearAmount("0.05"));
+      if (curAllowance < minRequired) {
+        console.log(`[Auto-Refill] Agent key allowance is low (${curAllowance} yocto). Replenishing with 1.0 NEAR...`);
+        const agentKeyObj = KeyPair.fromString(agentPrivKey).getPublicKey();
+        await ownerAccount.signAndSendTransaction({
+          receiverId: accountId,
+          actions: [
+            actions.deleteKey(agentKeyObj),
+            actions.addFunctionCallAccessKey(
+              agentKeyObj,
+              accountId,
+              ['propose_payment'],
+              BigInt(parseNearAmount("1.0"))
+            )
+          ]
+        });
+        console.log(`[Auto-Refill] Agent access key replenished successfully with 1.0 NEAR allowance!`);
+      }
+    }
+  } catch (e) {
+    console.warn(`[Auto-Refill] Key allowance replenishment check: ${e.message}`);
+  }
+
   let passed = 0;
   let total = 0;
 
